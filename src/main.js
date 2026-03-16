@@ -32,24 +32,36 @@ const URLS = {
 };
 
 const SOUND_TYPES = ['kick', 'snare', 'hihat', 'tom', 'clap', 'cowbell', 'shaker', 'conga', 'rim'];
-const DEFAULT_MAP = { bottle: 'cowbell', bowl: 'tom', cup: 'hihat', scissors: 'clap', book: 'snare', cellphone: 'rim', keyboard: 'kick', spoon: 'shaker' };
+const DEFAULT_MAP = { bottle: 'cowbell', bowl: 'tom', cup: 'hihat', scissors: 'clap', book: 'snare', 'cell phone': 'rim', keyboard: 'kick', spoon: 'shaker', laptop: 'tom', mouse: 'hihat', remote: 'clap', backpack: 'conga', 'potted plant': 'cowbell' };
 
 const BLOCKED_CLASS_ALIASES = new Set(['person', 'people', 'human', 'man', 'woman', 'boy', 'girl']);
+const SUPPRESSED_CLASSES = new Set(['bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light', 'fire hydrant', 'stop sign', 'parking meter']);
+const INDOOR_PRIORITY_CLASSES = new Set([
+  'book', 'cell phone', 'keyboard', 'mouse', 'laptop', 'remote', 'backpack', 'bottle', 'cup', 'bowl', 'scissors', 'spoon',
+  'potted plant', 'vase', 'chair', 'couch', 'bed', 'dining table', 'tv', 'clock', 'toothbrush', 'teddy bear', 'wine glass'
+]);
 
-function normalizeLabel(label) {
-  return String(label || '').toLowerCase().trim().replace(/[_-]+/g, ' ');
-}
-
-function isBlockedClass(label) {
-  return BLOCKED_CLASS_ALIASES.has(normalizeLabel(label));
-}
+const TRACKING = {
+  minArea: 1400,
+  detectEveryMs: 90,
+  maxDetections: 35,
+  trackCreateBoostNonPriority: 0.08,
+  trackUpdateSlack: 0.16,
+  iouMatchThreshold: 0.2,
+  distanceMatchNorm: 0.6,
+  confirmHits: 2,
+  maxMisses: 14,
+  staleMs: 1800,
+  edgeExpireGraceMs: 500,
+  maxRenderedTracks: 12
+};
 
 const state = {
   detector: null,
   handLandmarker: null,
   modelsLoadPromise: null,
   lastDetectionAt: 0,
-  tracked: new Map(),
+  tracks: new Map(),
   nextTrackId: 1,
   fingertips: [],
   hitCount: 0,
@@ -61,8 +73,7 @@ const state = {
     confidence: Number(confidenceInput.value),
     cooldownMs: Number(cooldownInput.value),
     smoothing: Number(smoothingInput.value),
-    stabilityFrames: Number(stabilityInput.value),
-    minArea: 2200
+    stabilityFrames: Number(stabilityInput.value)
   },
   audio: null,
   running: false,
@@ -70,10 +81,31 @@ const state = {
   lastMappingKey: ''
 };
 
+function normalizeLabel(label) {
+  return String(label || '').toLowerCase().trim().replace(/[_-]+/g, ' ');
+}
+
+function isBlockedClass(label) {
+  return BLOCKED_CLASS_ALIASES.has(normalizeLabel(label));
+}
+
+function isSuppressedClass(label) {
+  return SUPPRESSED_CLASSES.has(normalizeLabel(label));
+}
+
+function isIndoorPriorityClass(label) {
+  return INDOOR_PRIORITY_CLASSES.has(normalizeLabel(label));
+}
+
+function labelThreshold(label) {
+  const base = state.settings.confidence;
+  return isIndoorPriorityClass(label) ? base : Math.min(0.92, base + TRACKING.trackCreateBoostNonPriority);
+}
+
 function logInit(message) {
   const line = `[${new Date().toLocaleTimeString()}] ${message}`;
   console.info('[init]', message);
-  initLogEl.textContent = `${line}\n${initLogEl.textContent}`.split('\n').slice(0, 16).join('\n');
+  initLogEl.textContent = `${line}\n${initLogEl.textContent}`.split('\n').slice(0, 18).join('\n');
 }
 
 function setError(message) {
@@ -99,8 +131,8 @@ function ensureSecureContext() {
 }
 
 async function importModule(url, label) {
+  logInit(`Importing ${label}: ${url}`);
   try {
-    logInit(`Importing ${label}: ${url}`);
     return await import(url);
   } catch (err) {
     throw new Error(`${label} import failed from ${url}. ${statusText(err)}`);
@@ -139,6 +171,7 @@ function playSound(type) {
     for (let i = 0; i < channel.length; i++) channel[i] = Math.random() * 2 - 1;
     return buffer;
   };
+
   const hitTone = (freq, decay, wave = 'sine', gain = 0.8) => {
     const osc = state.audio.createOscillator();
     const g = state.audio.createGain();
@@ -151,6 +184,7 @@ function playSound(type) {
     osc.start(now);
     osc.stop(now + decay);
   };
+
   const hitNoise = (decay, filterFreq, gain = 0.35) => {
     const src = state.audio.createBufferSource();
     src.buffer = noiseBuffer();
@@ -180,11 +214,13 @@ function playSound(type) {
 
 async function loadModels() {
   if (state.modelsLoadPromise) return state.modelsLoadPromise;
+
   state.modelsLoadPromise = (async () => {
     setComponentStatus('model', 'Loading');
     setComponentStatus('detector', 'Loading');
     setComponentStatus('hand', 'Loading');
     statusBadge.textContent = 'Loading models…';
+
     try {
       ensureSecureContext();
       const tf = globalThis.tf;
@@ -194,7 +230,6 @@ async function loadModels() {
       logInit(`TFJS backend: ${tf.getBackend?.() || 'unknown'}`);
 
       const mediapipe = await importModule(URLS.mpTasks, 'MediaPipe Tasks Vision');
-
       state.detector = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
       setComponentStatus('detector', 'Ready');
       logInit('Object detector ready');
@@ -220,12 +255,12 @@ async function loadModels() {
       if (!state.detector) setComponentStatus('detector', 'Failed');
       if (!state.handLandmarker) setComponentStatus('hand', 'Failed');
       statusBadge.textContent = 'Model load failed';
-      const msg = statusText(err);
-      setError(`Model initialization failed. ${msg}`);
-      logInit(`Model load failed: ${msg}`);
+      setError(`Model initialization failed. ${statusText(err)}`);
+      logInit(`Model load failed: ${statusText(err)}`);
       throw err;
     }
   })();
+
   return state.modelsLoadPromise;
 }
 
@@ -238,73 +273,162 @@ function iou(a, b) {
   return inter ? inter / (a.w * a.h + b.w * b.h - inter) : 0;
 }
 
-function updateTracks(predictions) {
-  const now = performance.now();
-  const unmatched = new Set(state.tracked.keys());
+function centerDistanceNorm(a, b) {
+  const ax = a.x + a.w / 2;
+  const ay = a.y + a.h / 2;
+  const bx = b.x + b.w / 2;
+  const by = b.y + b.h / 2;
+  const dx = ax - bx;
+  const dy = ay - by;
+  const diagonal = Math.hypot(canvas.width, canvas.height) || 1;
+  return Math.hypot(dx, dy) / diagonal;
+}
 
-  predictions.forEach((p) => {
-    const [x, y, w, h] = p.bbox;
-    if (isBlockedClass(p.class) || p.score < state.settings.confidence || w * h < state.settings.minArea) return;
+function isNearFrameEdge(box, margin = 16) {
+  return box.x <= margin || box.y <= margin || box.x + box.w >= canvas.width - margin || box.y + box.h >= canvas.height - margin;
+}
 
-    let bestId = null;
-    let bestIou = 0;
-    for (const [id, t] of state.tracked) {
-      if (t.label !== p.class) continue;
-      const overlap = iou({ x, y, w, h }, t.box);
-      if (overlap > 0.25 && overlap > bestIou) {
-        bestIou = overlap;
-        bestId = id;
-      }
+function detectionPassesCreateGate(pred) {
+  if (isBlockedClass(pred.class) || isSuppressedClass(pred.class)) return false;
+  const [x, y, w, h] = pred.bbox;
+  if (w * h < TRACKING.minArea) return false;
+  return pred.score >= labelThreshold(pred.class);
+}
+
+function detectionPassesUpdateGate(pred) {
+  if (isBlockedClass(pred.class) || isSuppressedClass(pred.class)) return false;
+  const [x, y, w, h] = pred.bbox;
+  if (w * h < TRACKING.minArea * 0.7) return false;
+  const relaxed = Math.max(0.15, labelThreshold(pred.class) - TRACKING.trackUpdateSlack);
+  return pred.score >= relaxed;
+}
+
+function createTrack(pred, now) {
+  const [x, y, w, h] = pred.bbox;
+  const id = String(state.nextTrackId++);
+  state.tracks.set(id, {
+    id,
+    label: pred.class,
+    score: pred.score,
+    box: { x, y, w, h },
+    hitStreak: 1,
+    missCount: 0,
+    confirmed: false,
+    createdAt: now,
+    lastSeen: now,
+    lastSeenNearEdge: isNearFrameEdge({ x, y, w, h }),
+    flashUntil: 0
+  });
+  assignDefaultSound(pred.class);
+}
+
+function bestTrackForDetection(pred, usedTrackIds) {
+  const [x, y, w, h] = pred.bbox;
+  const detBox = { x, y, w, h };
+  let best = null;
+  let bestScore = -Infinity;
+
+  state.tracks.forEach((track) => {
+    if (usedTrackIds.has(track.id)) return;
+    if (track.label !== pred.class) return;
+
+    const overlap = iou(detBox, track.box);
+    const dist = centerDistanceNorm(detBox, track.box);
+    if (overlap < TRACKING.iouMatchThreshold && dist > TRACKING.distanceMatchNorm) return;
+
+    const score = overlap * 1.2 - dist;
+    if (score > bestScore) {
+      bestScore = score;
+      best = track;
     }
-
-    if (bestId) {
-      unmatched.delete(bestId);
-      const t = state.tracked.get(bestId);
-      const a = state.settings.smoothing;
-      t.box = {
-        x: t.box.x * (1 - a) + x * a,
-        y: t.box.y * (1 - a) + y * a,
-        w: t.box.w * (1 - a) + w * a,
-        h: t.box.h * (1 - a) + h * a
-      };
-      t.score = p.score;
-      t.lastSeen = now;
-      t.seenFrames += 1;
-    } else {
-      const id = String(state.nextTrackId++);
-      state.tracked.set(id, { id, label: p.class, score: p.score, box: { x, y, w, h }, seenFrames: 1, lastSeen: now, flashUntil: 0 });
-    }
-    assignDefaultSound(p.class);
   });
 
-  unmatched.forEach((id) => {
-    const t = state.tracked.get(id);
-    if (now - t.lastSeen > 450) {
-      state.tracked.delete(id);
-      state.cooldownByTrack.delete(id);
-      for (const k of state.insideState.keys()) if (k.endsWith(`|${id}`)) state.insideState.delete(k);
+  return best;
+}
+
+function updateTracks(predictions) {
+  const now = performance.now();
+  const candidatePreds = predictions.filter((p) => detectionPassesUpdateGate(p));
+  const usedTrackIds = new Set();
+
+  candidatePreds.forEach((pred) => {
+    const track = bestTrackForDetection(pred, usedTrackIds);
+
+    if (track) {
+      const [x, y, w, h] = pred.bbox;
+      const a = state.settings.smoothing;
+      track.box = {
+        x: track.box.x * (1 - a) + x * a,
+        y: track.box.y * (1 - a) + y * a,
+        w: track.box.w * (1 - a) + w * a,
+        h: track.box.h * (1 - a) + h * a
+      };
+      track.score = pred.score;
+      track.lastSeen = now;
+      track.lastSeenNearEdge = isNearFrameEdge(track.box);
+      track.missCount = 0;
+      track.hitStreak += 1;
+      if (track.hitStreak >= TRACKING.confirmHits) track.confirmed = true;
+      usedTrackIds.add(track.id);
+      assignDefaultSound(track.label);
+      return;
+    }
+
+    if (detectionPassesCreateGate(pred)) {
+      createTrack(pred, now);
+    }
+  });
+
+  state.tracks.forEach((track) => {
+    if (usedTrackIds.has(track.id)) return;
+    track.missCount += 1;
+
+    const tooManyMisses = track.missCount > TRACKING.maxMisses;
+    const tooOld = now - track.lastSeen > TRACKING.staleMs;
+    const edgeLikelyLeft = track.lastSeenNearEdge && now - track.lastSeen > TRACKING.edgeExpireGraceMs;
+
+    if (tooManyMisses || tooOld || edgeLikelyLeft) {
+      state.tracks.delete(track.id);
+      state.cooldownByTrack.delete(track.id);
+      for (const k of state.insideState.keys()) {
+        if (k.endsWith(`|${track.id}`)) state.insideState.delete(k);
+      }
     }
   });
 }
 
+function rankedVisibleTracks() {
+  return Array.from(state.tracks.values())
+    .filter((t) => t.confirmed || t.hitStreak >= state.settings.stabilityFrames)
+    .filter((t) => t.missCount <= TRACKING.maxMisses)
+    .sort((a, b) => {
+      const indoorDiff = Number(isIndoorPriorityClass(b.label)) - Number(isIndoorPriorityClass(a.label));
+      if (indoorDiff !== 0) return indoorDiff;
+      const freshDiff = b.lastSeen - a.lastSeen;
+      if (freshDiff !== 0) return freshDiff;
+      return b.score - a.score;
+    })
+    .slice(0, TRACKING.maxRenderedTracks);
+}
+
 function updateMappingsUi() {
-  const labels = Array.from(new Set(Array.from(state.tracked.values())
-    .map((t) => t.label)
-    .filter((label) => !isBlockedClass(label)))).sort();
+  const labels = Array.from(new Set(rankedVisibleTracks().map((t) => t.label))).sort();
   const nextKey = labels.join('|');
 
   const active = document.activeElement;
-  const interactingWithMappingSelect = active && mappingListEl.contains(active) && active.tagName === 'SELECT';
-  if (interactingWithMappingSelect) return;
+  const interacting = active && mappingListEl.contains(active) && active.tagName === 'SELECT';
+  if (interacting) return;
   if (nextKey === state.lastMappingKey) return;
 
   state.lastMappingKey = nextKey;
   mappingListEl.innerHTML = '';
+
   labels.forEach((label) => {
     const row = document.createElement('div');
     row.className = 'mapping-row';
     const span = document.createElement('span');
     span.textContent = label;
+
     const sel = document.createElement('select');
     SOUND_TYPES.forEach((soundName) => {
       const option = document.createElement('option');
@@ -313,19 +437,19 @@ function updateMappingsUi() {
       if ((state.soundMap[label] || assignDefaultSound(label)) === soundName) option.selected = true;
       sel.appendChild(option);
     });
+
     sel.addEventListener('change', () => {
       state.soundMap[label] = sel.value;
       localStorage.setItem('object-drum-map', JSON.stringify(state.soundMap));
     });
+
     row.append(span, sel);
     mappingListEl.append(row);
   });
 }
 
 function updateObjectList() {
-  const active = Array.from(state.tracked.values())
-    .filter((t) => t.seenFrames >= state.settings.stabilityFrames && !isBlockedClass(t.label))
-    .sort((a, b) => b.score - a.score);
+  const active = rankedVisibleTracks();
   objectListEl.innerHTML = active.length
     ? active.map((t) => `<li><span>${t.label}</span><strong>${Math.round(t.score * 100)}%</strong></li>`).join('')
     : '<li><span>No stable detections yet</span><strong>–</strong></li>';
@@ -337,17 +461,18 @@ function pointInBox(pt, box) {
 
 function handleHits() {
   const now = performance.now();
-  const stableTracks = Array.from(state.tracked.values()).filter((t) => t.seenFrames >= state.settings.stabilityFrames);
+  const visibleTracks = rankedVisibleTracks();
 
   state.fingertips.forEach((tip, idx) => {
-    const containing = stableTracks.filter((t) => pointInBox(tip, t.box));
+    const containing = visibleTracks.filter((t) => pointInBox(tip, t.box));
     containing.sort((a, b) => a.box.w * a.box.h - b.box.w * b.box.h);
     const winner = containing[0];
 
-    stableTracks.forEach((track) => {
+    visibleTracks.forEach((track) => {
       const key = `${idx}|${track.id}`;
       const inside = winner?.id === track.id;
       const wasInside = state.insideState.get(key) || false;
+
       if (inside && !wasInside) {
         const canHit = now - (state.cooldownByTrack.get(track.id) || 0) > state.settings.cooldownMs;
         if (canHit) {
@@ -359,6 +484,7 @@ function handleHits() {
           state.lastHit = `${track.label} → ${sound}`;
         }
       }
+
       state.insideState.set(key, inside);
     });
   });
@@ -376,17 +502,18 @@ function drawFrame() {
   ctx.drawImage(video, 0, 0, w, h);
   ctx.restore();
 
-  const stableTracks = Array.from(state.tracked.values()).filter((t) => t.seenFrames >= state.settings.stabilityFrames);
-  stableTracks.forEach((t) => {
+  rankedVisibleTracks().forEach((t) => {
     const x = w - (t.box.x + t.box.w);
     const flash = performance.now() < t.flashUntil;
+
     ctx.lineWidth = flash ? 4 : 2;
-    ctx.strokeStyle = flash ? '#2ee8a6' : '#80a4ff';
+    ctx.strokeStyle = flash ? '#2ee8a6' : (isIndoorPriorityClass(t.label) ? '#80a4ff' : '#64759c');
     ctx.fillStyle = flash ? 'rgba(46, 232, 166, .18)' : 'rgba(28, 44, 88, .22)';
     ctx.fillRect(x, t.box.y, t.box.w, t.box.h);
     ctx.strokeRect(x, t.box.y, t.box.w, t.box.h);
 
-    const label = `${t.label} ${Math.round(t.score * 100)}%`;
+    const staleTag = t.missCount > 0 ? ` • hold ${t.missCount}` : '';
+    const label = `${t.label} ${Math.round(t.score * 100)}%${staleTag}`;
     ctx.font = '13px Inter, sans-serif';
     const tw = ctx.measureText(label).width;
     ctx.fillStyle = '#0c1220';
@@ -410,14 +537,16 @@ function drawFrame() {
 async function step() {
   if (!state.running) return;
   const now = performance.now();
+
   try {
-    if (now - state.lastDetectionAt > 120) {
-      const preds = await state.detector.detect(video, 20);
+    if (now - state.lastDetectionAt > TRACKING.detectEveryMs) {
+      const preds = await state.detector.detect(video, TRACKING.maxDetections);
       updateTracks(preds);
       updateMappingsUi();
       updateObjectList();
       state.lastDetectionAt = now;
     }
+
     const hands = state.handLandmarker.detectForVideo(video, now);
     state.fingertips = (hands.landmarks || []).map((landmarks) => ({
       x: landmarks[8].x * canvas.width,
@@ -430,6 +559,7 @@ async function step() {
     state.fpsSamples.push(now);
     while (state.fpsSamples.length && now - state.fpsSamples[0] > 1000) state.fpsSamples.shift();
     fpsEl.textContent = String(state.fpsSamples.length);
+
     requestAnimationFrame(step);
   } catch (err) {
     const msg = `Runtime loop failed. ${statusText(err)}`;
@@ -443,36 +573,31 @@ async function step() {
 
 function cameraErrorMessage(err) {
   if (!err) return 'Unknown camera error';
-  if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-    return 'Camera permission was denied. Allow webcam access in browser site settings and retry.';
-  }
-  if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-    return 'No camera device found. Connect/enable a webcam and retry.';
-  }
-  if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-    return 'Camera is busy or blocked by another app. Close competing apps and retry.';
-  }
-  if (err.name === 'OverconstrainedError') {
-    return `Requested camera constraints are unsupported (${err.constraint || 'unknown constraint'}).`;
-  }
+  if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') return 'Camera permission was denied. Allow webcam access in browser site settings and retry.';
+  if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') return 'No camera device found. Connect/enable a webcam and retry.';
+  if (err.name === 'NotReadableError' || err.name === 'TrackStartError') return 'Camera is busy or blocked by another app. Close competing apps and retry.';
+  if (err.name === 'OverconstrainedError') return `Requested camera constraints are unsupported (${err.constraint || 'unknown constraint'}).`;
   return statusText(err);
 }
 
 async function start() {
   setError('No errors.');
   startBtn.disabled = true;
+
   try {
     ensureSecureContext();
     setComponentStatus('camera', 'Requesting');
     statusBadge.textContent = 'Requesting camera…';
     logInit(`Requesting webcam from origin ${location.origin}`);
 
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error('getUserMedia is not available in this browser. Use latest Chrome/Edge/Safari.');
-    }
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('getUserMedia is not available in this browser. Use latest Chrome/Edge/Safari.');
 
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+      video: {
+        width: { ideal: 1600 },
+        height: { ideal: 900 },
+        facingMode: 'environment'
+      },
       audio: false
     });
 
@@ -503,7 +628,7 @@ async function start() {
 
   state.running = true;
   statusBadge.textContent = 'Live';
-  logInit('Live processing started');
+  logInit('Live processing started. Indoor classes prioritized; person class filtered.');
   step();
 }
 
@@ -522,20 +647,18 @@ async function start() {
 
 window.addEventListener('unhandledrejection', (event) => {
   const msg = `Unhandled promise rejection: ${statusText(event.reason)}`;
-  console.error(msg, event.reason);
   setError(msg);
   logInit(msg);
 });
 
 window.addEventListener('error', (event) => {
   const msg = `Window error: ${event.message}`;
-  console.error(msg, event.error);
   setError(msg);
   logInit(msg);
 });
 
 startBtn.addEventListener('click', start);
-logInit('Booted. Click "Start Camera" to begin. Person/human classes are filtered out.');
+logInit('Booted. Click "Start Camera" to begin. Persistent track hold is enabled.');
 loadModels().catch((err) => {
   logInit(`Background model preload failed: ${statusText(err)}`);
 });

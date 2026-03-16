@@ -1,52 +1,86 @@
-# Detectable Objects in Object Drum
+# Detectable Objects (Model vs App Policy)
 
 This app uses **TensorFlow.js COCO-SSD** (`@tensorflow-models/coco-ssd`, base `lite_mobilenet_v2`).
-That means raw detections come from the model's pretrained **COCO object categories** (80 classes).
+The detector can output COCO object categories, while the app applies additional filtering/prioritization rules for interaction quality.
 
-## Model can detect (COCO-SSD classes)
+## 1) Model can detect (COCO-SSD class family)
 
-The COCO-SSD model is expected to detect classes from the COCO label set, including common categories such as:
+COCO-SSD commonly includes classes such as:
 
 - person
-- bicycle, car, motorcycle, bus, train, truck, boat, airplane
-- traffic light, fire hydrant, stop sign, parking meter
-- bench, chair, couch, bed, dining table, toilet
-- backpack, handbag, suitcase, tie, umbrella
-- bottle, wine glass, cup, bowl, fork, knife, spoon
-- banana, apple, sandwich, orange, broccoli, carrot, hot dog, pizza, donut, cake
-- tv, laptop, mouse, remote, keyboard, cell phone
-- microwave, oven, toaster, sink, refrigerator
-- book, clock, vase, scissors, teddy bear, hair drier, toothbrush
-- sports ball, baseball bat, baseball glove, skateboard, surfboard, tennis racket, frisbee, kite
-- potted plant, dog, cat, bird, horse, sheep, cow, elephant, bear, zebra, giraffe
+- vehicle/road classes (bicycle, car, bus, train, truck, motorcycle, airplane, boat, traffic light, stop sign, etc.)
+- indoor/common classes (book, cell phone, keyboard, mouse, laptop, remote, backpack, bottle, cup, bowl, spoon, scissors, potted plant, vase, chair, couch, dining table, bed, tv, clock, etc.)
+- animals and assorted household categories.
 
-> Source basis: the project loads COCO-SSD (`@tensorflow-models/coco-ssd`) and therefore follows its COCO class vocabulary.
+## 2) App currently allows as interactive objects
 
-## App currently allows as interactive objects
+The app does **not** expose every model class equally.
 
-- The app allows all model-detected classes **except person/human-related labels**.
-- Specifically, these labels are intentionally filtered out before tracking/render/hit/mapping:
-  - `person`, `people`, `human`, `man`, `woman`, `boy`, `girl`
+### Fully filtered (never shown / never playable)
+- `person`, `people`, `human`, `man`, `woman`, `boy`, `girl`
 
-So although the model can detect `person`, the app deliberately does **not** show or use person detections.
+### Suppressed to reduce clutter
+- `bicycle`, `car`, `motorcycle`, `airplane`, `bus`, `train`, `truck`, `boat`, `traffic light`, `fire hydrant`, `stop sign`, `parking meter`
 
-## Why results vary in real usage
+### Prioritized indoor/common classes
+Examples include:
+- `book`, `cell phone`, `keyboard`, `mouse`, `laptop`, `remote`, `backpack`
+- `bottle`, `cup`, `bowl`, `scissors`, `spoon`
+- `potted plant`, `vase`, `chair`, `couch`, `bed`, `dining table`, `tv`, `clock`
 
-Detection quality depends on:
+## Requested dorm/desk items: direct vs approximate vs unsupported
 
-- lighting
-- camera angle/distance
-- occlusion
+### Directly supported by model class name
+- book
+- phone (as `cell phone`)
+- cup / mug (as `cup`)
+- bowl
+- bottle
+- scissors
+- spoon
+- keyboard
+- mouse
+- laptop
+- backpack
+- remote
+- plant / pot (as `potted plant`)
+
+### Approximate only (closest model category)
+- notebook (often detected as `book`)
+- flower (may appear as `potted plant` or `vase` context)
+- desk lamp (no dedicated lamp class; sometimes weakly mapped to nearby household classes)
+- camera-style items / polaroid (can be inconsistently detected, often as `cell phone` or not at all)
+- fan (no dedicated fan class)
+
+### Not directly supported in COCO label space
+- vinyl record
+- tissue / tissue box
+- pen
+- pencil
+- headphones
+- candle
+
+## Real-world detection quality factors
+
+Results depend on:
+- lighting and contrast
 - object size in frame
-- motion blur
-- confidence threshold setting in the UI
+- camera angle and distance
+- occlusion and motion blur
+- confidence threshold setting
 
-## How to add or filter classes in the future
+## Tracking/persistence behavior
+
+The app uses a tracked-object layer over raw detections:
+- tracks are matched by class + IoU + center distance,
+- temporary misses are tolerated,
+- boxes are smoothed,
+- tracks expire only after sustained loss/edge-leave conditions.
+
+## How to adjust class policy
 
 In `src/main.js`:
-
-1. Update `BLOCKED_CLASS_ALIASES` to filter additional classes.
-2. Update `DEFAULT_MAP` to tune default drum assignments for class names.
-3. (Optional) add a whitelist strategy if you only want selected classes to be playable.
-
-Filtering is centralized in `isBlockedClass()` and applied in detection processing and UI list/mapping flows.
+- edit `BLOCKED_CLASS_ALIASES` to exclude additional labels,
+- edit `SUPPRESSED_CLASSES` for clutter reduction,
+- edit `INDOOR_PRIORITY_CLASSES` to bias class ranking/retention,
+- edit `DEFAULT_MAP` to tune default sound assignment.
