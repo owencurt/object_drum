@@ -35,6 +35,9 @@
             <div><span>Camera</span><strong id="cameraStatus">Idle</strong></div>
             <div><span>Object Detector</span><strong id="detectorStatus">Idle</strong></div>
             <div><span>Hand Tracker</span><strong id="handStatus">Idle</strong></div>
+            <div><span>Detector Model</span><strong id="detectorModel">–</strong></div>
+            <div><span>Raw Detections</span><strong id="rawDetections">0</strong></div>
+            <div><span>Tracked</span><strong id="trackedCount">0</strong></div>
           </div>
           <div class="diag">
             <h3>Diagnostics</h3>
@@ -45,23 +48,29 @@
 
         <section>
           <h2>Controls</h2>
-          <label>Confidence <span id="confValue">0.55</span>
-            <input id="confidence" type="range" min="0.2" max="0.9" step="0.01" value="0.55" />
+          <label>Confidence <span id="confValue">0.42</span>
+            <input id="confidence" type="range" min="0.15" max="0.9" step="0.01" value="0.42" />
           </label>
           <label>Hit Cooldown (ms) <span id="cooldownValue">280</span>
             <input id="cooldown" type="range" min="80" max="1000" step="20" value="280" />
           </label>
-          <label>Smoothing <span id="smoothValue">0.35</span>
-            <input id="smoothing" type="range" min="0.1" max="0.85" step="0.05" value="0.35" />
+          <label>Smoothing <span id="smoothValue">0.3</span>
+            <input id="smoothing" type="range" min="0.1" max="0.85" step="0.05" value="0.3" />
           </label>
-          <label>Stability Frames <span id="stableValue">3</span>
-            <input id="stability" type="range" min="1" max="8" step="1" value="3" />
+          <label>Stability Frames <span id="stableValue">2</span>
+            <input id="stability" type="range" min="1" max="8" step="1" value="2" />
           </label>
+          <label class="checkbox-row"><input id="debugRaw" type="checkbox" /> Show raw detections</label>
         </section>
 
         <section>
           <h2>Detected Objects</h2>
           <ul id="objectList" class="object-list"></ul>
+        </section>
+
+        <section>
+          <h2>Raw Detections (debug)</h2>
+          <ul id="rawList" class="object-list"></ul>
         </section>
 
         <section>

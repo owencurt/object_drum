@@ -1,52 +1,101 @@
 # Detectable Objects in Object Drum
 
-This app uses **TensorFlow.js COCO-SSD** (`@tensorflow-models/coco-ssd`, base `lite_mobilenet_v2`).
-That means raw detections come from the model's pretrained **COCO object categories** (80 classes).
+This app uses **TensorFlow.js COCO-SSD** with base **`mobilenet_v1`**.
 
-## Model can detect (COCO-SSD classes)
+## 1) Detector fit assessment (for this project)
 
-The COCO-SSD model is expected to detect classes from the COCO label set, including common categories such as:
+### Why prior quality was weak
 
-- person
-- bicycle, car, motorcycle, bus, train, truck, boat, airplane
-- traffic light, fire hydrant, stop sign, parking meter
-- bench, chair, couch, bed, dining table, toilet
-- backpack, handbag, suitcase, tie, umbrella
-- bottle, wine glass, cup, bowl, fork, knife, spoon
-- banana, apple, sandwich, orange, broccoli, carrot, hot dog, pizza, donut, cake
-- tv, laptop, mouse, remote, keyboard, cell phone
-- microwave, oven, toaster, sink, refrigerator
-- book, clock, vase, scissors, teddy bear, hair drier, toothbrush
-- sports ball, baseball bat, baseball glove, skateboard, surfboard, tennis racket, frisbee, kite
-- potted plant, dog, cat, bird, horse, sheep, cow, elephant, bear, zebra, giraffe
+In the previous setup, detection quality was limited by a combination of:
 
-> Source basis: the project loads COCO-SSD (`@tensorflow-models/coco-ssd`) and therefore follows its COCO class vocabulary.
+- lighter detector base (`lite_mobilenet_v2`) with weaker recall on cluttered indoor scenes
+- high default confidence for stable-track creation
+- modest camera input constraints
+- short track persistence window after misses
 
-## App currently allows as interactive objects
+This caused missed small/background items and unstable object presence.
 
-- The app allows all model-detected classes **except person/human-related labels**.
-- Specifically, these labels are intentionally filtered out before tracking/render/hit/mapping:
-  - `person`, `people`, `human`, `man`, `woman`, `boy`, `girl`
+### What changed now
 
-So although the model can detect `person`, the app deliberately does **not** show or use person detections.
+- switched detector base to `mobilenet_v1`
+- increased ideal camera resolution request
+- increased detection frequency and max returned boxes
+- added miss-tolerant track persistence
+- added indoor-priority thresholding and ranking
+- added optional raw-detection debug list
 
-## Why results vary in real usage
+## 2) Model class coverage vs app behavior
 
-Detection quality depends on:
+COCO-SSD can detect COCO-family categories (80 classes), including many indoor-relevant classes such as:
 
-- lighting
-- camera angle/distance
+- book
+- cell phone
+- keyboard
+- mouse
+- laptop
+- remote
+- backpack
+- bottle
+- cup
+- bowl
+- spoon
+- scissors
+- potted plant
+- vase
+
+The app still filters person/human classes from playable object flow.
+
+## 3) Requested objects: direct vs approximate vs unsupported
+
+### Directly represented by COCO class names
+
+- books
+- phone (`cell phone`)
+- cup / mug (`cup`)
+- bowl
+- bottle
+- scissors
+- spoon
+- keyboard
+- mouse
+- laptop
+- backpack
+- remote
+- plant pot / pot (`potted plant`)
+
+### Approximate only
+
+- notebook (often appears as `book`)
+- flower (often via `potted plant` or `vase` context)
+- polaroid/camera-like items (may be inconsistent)
+- desk lamp (no dedicated lamp class)
+- fan (no dedicated fan class)
+
+### Not reliably supported in COCO label space
+
+- candle
+- vinyl records
+- tissue / tissue box
+- pen
+- pencil
+- headphones
+
+## 4) Real-world quality factors
+
+Detection reliability still depends on:
+
+- lighting and contrast
+- distance/size in frame
+- camera angle
 - occlusion
-- object size in frame
 - motion blur
-- confidence threshold setting in the UI
+- chosen confidence setting
 
-## How to add or filter classes in the future
+## 5) Tuning locations in code
 
-In `src/main.js`:
+Primary detection-quality settings are in `src/main.js`:
 
-1. Update `BLOCKED_CLASS_ALIASES` to filter additional classes.
-2. Update `DEFAULT_MAP` to tune default drum assignments for class names.
-3. (Optional) add a whitelist strategy if you only want selected classes to be playable.
-
-Filtering is centralized in `isBlockedClass()` and applied in detection processing and UI list/mapping flows.
+- `DETECTION_CONFIG`
+- `INDOOR_PRIORITY`
+- `labelThreshold()`
+- track-expiry handling in `updateTracks()`

@@ -52,3 +52,6 @@ select { width: 100%; background: #121d30; color: var(--text); border: 1px solid
 @media (max-width: 1100px) {
   .app-shell { grid-template-columns: 1fr; }
 }
+
+.checkbox-row { display: flex; align-items: center; gap: .5rem; }
+.checkbox-row input { width: auto; }
