@@ -78,7 +78,8 @@ const state = {
   audio: null,
   running: false,
   fpsSamples: [],
-  lastMappingKey: ''
+  lastMappingKey: '',
+  mirrorPreview: true
 };
 
 function normalizeLabel(label) {
@@ -493,17 +494,26 @@ function handleHits() {
   lastHitEl.textContent = state.lastHit;
 }
 
+
+function projectX(x) {
+  return state.mirrorPreview ? canvas.width - x : x;
+}
+
 function drawFrame() {
   const w = canvas.width;
   const h = canvas.height;
-  ctx.save();
-  ctx.translate(w, 0);
-  ctx.scale(-1, 1);
-  ctx.drawImage(video, 0, 0, w, h);
-  ctx.restore();
+  if (state.mirrorPreview) {
+    ctx.save();
+    ctx.translate(w, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, w, h);
+    ctx.restore();
+  } else {
+    ctx.drawImage(video, 0, 0, w, h);
+  }
 
   rankedVisibleTracks().forEach((t) => {
-    const x = w - (t.box.x + t.box.w);
+    const x = projectX(t.box.x + t.box.w) - t.box.w;
     const flash = performance.now() < t.flashUntil;
 
     ctx.lineWidth = flash ? 4 : 2;
@@ -523,7 +533,7 @@ function drawFrame() {
   });
 
   state.fingertips.forEach((tip) => {
-    const x = w - tip.x;
+    const x = projectX(tip.x);
     ctx.beginPath();
     ctx.arc(x, tip.y, 7, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255, 104, 165, .95)';
@@ -596,7 +606,7 @@ async function start() {
       video: {
         width: { ideal: 1600 },
         height: { ideal: 900 },
-        facingMode: 'environment'
+        facingMode: 'user'
       },
       audio: false
     });
@@ -605,6 +615,12 @@ async function start() {
     await video.play();
     canvas.width = video.videoWidth || 960;
     canvas.height = video.videoHeight || 540;
+
+    const track = stream.getVideoTracks()[0];
+    const facing = track?.getSettings?.().facingMode || 'user';
+    state.mirrorPreview = facing !== 'environment';
+    logInit(`Camera facing mode: ${facing}; mirror preview: ${state.mirrorPreview}`);
+
     setComponentStatus('camera', 'Ready');
     logInit(`Camera ready (${canvas.width}x${canvas.height})`);
   } catch (err) {
