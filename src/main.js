@@ -1,4 +1,3 @@
-
 const canvas = document.getElementById('stageCanvas');
 const ctx = canvas.getContext('2d');
 const video = document.getElementById('webcam');
@@ -6,11 +5,16 @@ const startBtn = document.getElementById('startBtn');
 const statusBadge = document.getElementById('statusBadge');
 
 const modelStatusEl = document.getElementById('modelStatus');
+const cameraStatusEl = document.getElementById('cameraStatus');
+const detectorStatusEl = document.getElementById('detectorStatus');
+const handStatusEl = document.getElementById('handStatus');
 const hitCountEl = document.getElementById('hitCount');
 const lastHitEl = document.getElementById('lastHit');
 const fpsEl = document.getElementById('fps');
 const objectListEl = document.getElementById('objectList');
 const mappingListEl = document.getElementById('mappingList');
+const errorDetailsEl = document.getElementById('errorDetails');
+const initLogEl = document.getElementById('initLog');
 
 const confidenceInput = document.getElementById('confidence');
 const cooldownInput = document.getElementById('cooldown');
@@ -21,21 +25,19 @@ const cooldownValue = document.getElementById('cooldownValue');
 const smoothValue = document.getElementById('smoothValue');
 const stableValue = document.getElementById('stableValue');
 
-const SOUND_TYPES = ['kick', 'snare', 'hihat', 'tom', 'clap', 'cowbell', 'shaker', 'conga', 'rim'];
-const DEFAULT_MAP = {
-  bottle: 'cowbell',
-  bowl: 'tom',
-  cup: 'hihat',
-  scissors: 'clap',
-  book: 'snare',
-  cellphone: 'rim',
-  keyboard: 'kick',
-  spoon: 'shaker'
+const URLS = {
+  mpTasks: 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/+esm',
+  mpWasmRoot: 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm',
+  mpHandTask: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task'
 };
+
+const SOUND_TYPES = ['kick', 'snare', 'hihat', 'tom', 'clap', 'cowbell', 'shaker', 'conga', 'rim'];
+const DEFAULT_MAP = { bottle: 'cowbell', bowl: 'tom', cup: 'hihat', scissors: 'clap', book: 'snare', cellphone: 'rim', keyboard: 'kick', spoon: 'shaker' };
 
 const state = {
   detector: null,
   handLandmarker: null,
+  modelsLoadPromise: null,
   lastDetectionAt: 0,
   tracked: new Map(),
   nextTrackId: 1,
@@ -56,6 +58,52 @@ const state = {
   running: false,
   fpsSamples: []
 };
+
+function logInit(message) {
+  const line = `[${new Date().toLocaleTimeString()}] ${message}`;
+  console.info('[init]', message);
+  initLogEl.textContent = `${line}\n${initLogEl.textContent}`.split('\n').slice(0, 16).join('\n');
+}
+
+function setError(message) {
+  errorDetailsEl.textContent = message || 'No errors.';
+}
+
+function statusText(err) {
+  if (!err) return 'Unknown error';
+  return `${err.name || 'Error'}: ${err.message || String(err)}`;
+}
+
+function setComponentStatus(component, text) {
+  if (component === 'model') modelStatusEl.textContent = text;
+  if (component === 'camera') cameraStatusEl.textContent = text;
+  if (component === 'detector') detectorStatusEl.textContent = text;
+  if (component === 'hand') handStatusEl.textContent = text;
+}
+
+function ensureSecureContext() {
+  const isLocalhost = ['localhost', '127.0.0.1', '::1'].includes(location.hostname);
+  if (window.isSecureContext || isLocalhost) return;
+  throw new Error(`Webcam requires secure context. Open via https:// or localhost (current origin: ${location.origin})`);
+}
+
+async function importModule(url, label) {
+  try {
+    logInit(`Importing ${label}: ${url}`);
+    return await import(url);
+  } catch (err) {
+    throw new Error(`${label} import failed from ${url}. ${statusText(err)}`);
+  }
+}
+
+async function verifyUrl(url, label) {
+  try {
+    const res = await fetch(url, { method: 'GET', mode: 'cors' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    throw new Error(`${label} resource not reachable at ${url}. ${statusText(err)}`);
+  }
+}
 
 function assignDefaultSound(label) {
   if (!state.soundMap[label]) {
@@ -80,7 +128,6 @@ function playSound(type) {
     for (let i = 0; i < channel.length; i++) channel[i] = Math.random() * 2 - 1;
     return buffer;
   };
-
   const hitTone = (freq, decay, wave = 'sine', gain = 0.8) => {
     const osc = state.audio.createOscillator();
     const g = state.audio.createGain();
@@ -89,12 +136,10 @@ function playSound(type) {
     osc.frequency.exponentialRampToValueAtTime(Math.max(50, freq * 0.25), now + decay);
     g.gain.setValueAtTime(gain, now);
     g.gain.exponentialRampToValueAtTime(0.001, now + decay);
-    osc.connect(g);
-    g.connect(output);
+    osc.connect(g).connect(output);
     osc.start(now);
     osc.stop(now + decay);
   };
-
   const hitNoise = (decay, filterFreq, gain = 0.35) => {
     const src = state.audio.createBufferSource();
     src.buffer = noiseBuffer();
@@ -123,21 +168,54 @@ function playSound(type) {
 }
 
 async function loadModels() {
-  statusBadge.textContent = 'Loading models…';
-  await import('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/+esm');
-  const cocoSsd = await import('https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/+esm');
-  const mediapipe = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/+esm');
-  state.detector = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
-  const vision = await mediapipe.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm');
-  state.handLandmarker = await mediapipe.HandLandmarker.createFromOptions(vision, {
-    baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task' },
-    runningMode: 'VIDEO',
-    numHands: 2,
-    minHandDetectionConfidence: 0.45,
-    minHandPresenceConfidence: 0.45,
-    minTrackingConfidence: 0.4
-  });
-  modelStatusEl.textContent = 'Ready';
+  if (state.modelsLoadPromise) return state.modelsLoadPromise;
+  state.modelsLoadPromise = (async () => {
+    setComponentStatus('model', 'Loading');
+    setComponentStatus('detector', 'Loading');
+    setComponentStatus('hand', 'Loading');
+    statusBadge.textContent = 'Loading models…';
+    try {
+      ensureSecureContext();
+      const tf = globalThis.tf;
+      const cocoSsd = globalThis.cocoSsd;
+      if (!tf) throw new Error('TensorFlow.js global failed to load from CDN script tag.');
+      if (!cocoSsd?.load) throw new Error('COCO-SSD global failed to load from CDN script tag.');
+      logInit(`TFJS backend: ${tf.getBackend?.() || 'unknown'}`);
+
+      const mediapipe = await importModule(URLS.mpTasks, 'MediaPipe Tasks Vision');
+
+      state.detector = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+      setComponentStatus('detector', 'Ready');
+      logInit('Object detector ready');
+
+      await verifyUrl(URLS.mpHandTask, 'Hand landmark model');
+      const vision = await mediapipe.FilesetResolver.forVisionTasks(URLS.mpWasmRoot);
+      state.handLandmarker = await mediapipe.HandLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: URLS.mpHandTask },
+        runningMode: 'VIDEO',
+        numHands: 2,
+        minHandDetectionConfidence: 0.45,
+        minHandPresenceConfidence: 0.45,
+        minTrackingConfidence: 0.4
+      });
+      setComponentStatus('hand', 'Ready');
+      logInit('Hand tracker ready');
+
+      setComponentStatus('model', 'Ready');
+      if (!state.running) statusBadge.textContent = 'Models ready';
+      setError('No errors.');
+    } catch (err) {
+      setComponentStatus('model', 'Failed');
+      if (!state.detector) setComponentStatus('detector', 'Failed');
+      if (!state.handLandmarker) setComponentStatus('hand', 'Failed');
+      statusBadge.textContent = 'Model load failed';
+      const msg = statusText(err);
+      setError(`Model initialization failed. ${msg}`);
+      logInit(`Model load failed: ${msg}`);
+      throw err;
+    }
+  })();
+  return state.modelsLoadPromise;
 }
 
 function iou(a, b) {
@@ -146,8 +224,7 @@ function iou(a, b) {
   const x2 = Math.min(a.x + a.w, b.x + b.w);
   const y2 = Math.min(a.y + a.h, b.y + b.h);
   const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
-  if (!inter) return 0;
-  return inter / (a.w * a.h + b.w * b.h - inter);
+  return inter ? inter / (a.w * a.h + b.w * b.h - inter) : 0;
 }
 
 function updateTracks(predictions) {
@@ -184,15 +261,7 @@ function updateTracks(predictions) {
       t.seenFrames += 1;
     } else {
       const id = String(state.nextTrackId++);
-      state.tracked.set(id, {
-        id,
-        label: p.class,
-        score: p.score,
-        box: { x, y, w, h },
-        seenFrames: 1,
-        lastSeen: now,
-        flashUntil: 0
-      });
+      state.tracked.set(id, { id, label: p.class, score: p.score, box: { x, y, w, h }, seenFrames: 1, lastSeen: now, flashUntil: 0 });
     }
     assignDefaultSound(p.class);
   });
@@ -251,7 +320,6 @@ function handleHits() {
 
   state.fingertips.forEach((tip, idx) => {
     const containing = stableTracks.filter((t) => pointInBox(tip, t.box));
-    // Overlap strategy: pick the smallest containing box to prefer deliberate small targets.
     containing.sort((a, b) => a.box.w * a.box.h - b.box.w * b.box.h);
     const winner = containing[0];
 
@@ -321,52 +389,101 @@ function drawFrame() {
 async function step() {
   if (!state.running) return;
   const now = performance.now();
+  try {
+    if (now - state.lastDetectionAt > 120) {
+      const preds = await state.detector.detect(video, 20);
+      updateTracks(preds);
+      updateMappingsUi();
+      updateObjectList();
+      state.lastDetectionAt = now;
+    }
+    const hands = state.handLandmarker.detectForVideo(video, now);
+    state.fingertips = (hands.landmarks || []).map((landmarks) => ({
+      x: landmarks[8].x * canvas.width,
+      y: landmarks[8].y * canvas.height
+    }));
 
-  if (now - state.lastDetectionAt > 120) {
-    const preds = await state.detector.detect(video, 20);
-    updateTracks(preds);
-    updateMappingsUi();
-    updateObjectList();
-    state.lastDetectionAt = now;
+    handleHits();
+    drawFrame();
+
+    state.fpsSamples.push(now);
+    while (state.fpsSamples.length && now - state.fpsSamples[0] > 1000) state.fpsSamples.shift();
+    fpsEl.textContent = String(state.fpsSamples.length);
+    requestAnimationFrame(step);
+  } catch (err) {
+    const msg = `Runtime loop failed. ${statusText(err)}`;
+    setError(msg);
+    statusBadge.textContent = 'Runtime error';
+    logInit(msg);
+    state.running = false;
+    startBtn.disabled = false;
   }
+}
 
-  const hands = state.handLandmarker.detectForVideo(video, now);
-  state.fingertips = (hands.landmarks || []).map((landmarks) => ({
-    x: landmarks[8].x * canvas.width,
-    y: landmarks[8].y * canvas.height
-  }));
-
-  handleHits();
-  drawFrame();
-
-  state.fpsSamples.push(now);
-  while (state.fpsSamples.length && now - state.fpsSamples[0] > 1000) state.fpsSamples.shift();
-  fpsEl.textContent = String(state.fpsSamples.length);
-
-  requestAnimationFrame(step);
+function cameraErrorMessage(err) {
+  if (!err) return 'Unknown camera error';
+  if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+    return 'Camera permission was denied. Allow webcam access in browser site settings and retry.';
+  }
+  if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+    return 'No camera device found. Connect/enable a webcam and retry.';
+  }
+  if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+    return 'Camera is busy or blocked by another app. Close competing apps and retry.';
+  }
+  if (err.name === 'OverconstrainedError') {
+    return `Requested camera constraints are unsupported (${err.constraint || 'unknown constraint'}).`;
+  }
+  return statusText(err);
 }
 
 async function start() {
+  setError('No errors.');
+  startBtn.disabled = true;
   try {
-    startBtn.disabled = true;
+    ensureSecureContext();
+    setComponentStatus('camera', 'Requesting');
     statusBadge.textContent = 'Requesting camera…';
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, facingMode: 'user' }, audio: false });
+    logInit(`Requesting webcam from origin ${location.origin}`);
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('getUserMedia is not available in this browser. Use latest Chrome/Edge/Safari.');
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+      audio: false
+    });
+
     video.srcObject = stream;
     await video.play();
-
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
-    if (!state.detector || !state.handLandmarker) await loadModels();
-
-    state.running = true;
-    statusBadge.textContent = 'Live';
-    step();
+    canvas.width = video.videoWidth || 960;
+    canvas.height = video.videoHeight || 540;
+    setComponentStatus('camera', 'Ready');
+    logInit(`Camera ready (${canvas.width}x${canvas.height})`);
   } catch (err) {
-    console.error(err);
-    statusBadge.textContent = 'Camera/Model error';
+    const msg = cameraErrorMessage(err);
+    setComponentStatus('camera', 'Failed');
+    statusBadge.textContent = 'Camera error';
+    setError(`Camera startup failed. ${msg}`);
+    logInit(`Camera startup failed: ${msg}`);
     startBtn.disabled = false;
+    return;
   }
+
+  try {
+    await loadModels();
+  } catch (err) {
+    statusBadge.textContent = 'Model error';
+    setError(`Model loading failed. ${statusText(err)}`);
+    startBtn.disabled = false;
+    return;
+  }
+
+  state.running = true;
+  statusBadge.textContent = 'Live';
+  logInit('Live processing started');
+  step();
 }
 
 [confidenceInput, cooldownInput, smoothingInput, stabilityInput].forEach((input) => {
@@ -382,9 +499,22 @@ async function start() {
   });
 });
 
+window.addEventListener('unhandledrejection', (event) => {
+  const msg = `Unhandled promise rejection: ${statusText(event.reason)}`;
+  console.error(msg, event.reason);
+  setError(msg);
+  logInit(msg);
+});
+
+window.addEventListener('error', (event) => {
+  const msg = `Window error: ${event.message}`;
+  console.error(msg, event.error);
+  setError(msg);
+  logInit(msg);
+});
+
 startBtn.addEventListener('click', start);
-loadModels().catch((e) => {
-  console.error(e);
-  modelStatusEl.textContent = 'Failed';
-  statusBadge.textContent = 'Model load failed';
+logInit('Booted. Click "Start Camera" to begin.');
+loadModels().catch((err) => {
+  logInit(`Background model preload failed: ${statusText(err)}`);
 });

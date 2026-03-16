@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Object Drum</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
@@ -30,7 +31,15 @@
             <div><span>Hits</span><strong id="hitCount">0</strong></div>
             <div><span>Last Hit</span><strong id="lastHit">–</strong></div>
             <div><span>FPS</span><strong id="fps">0</strong></div>
-            <div><span>Models</span><strong id="modelStatus">Loading…</strong></div>
+            <div><span>Model Bundle</span><strong id="modelStatus">Idle</strong></div>
+            <div><span>Camera</span><strong id="cameraStatus">Idle</strong></div>
+            <div><span>Object Detector</span><strong id="detectorStatus">Idle</strong></div>
+            <div><span>Hand Tracker</span><strong id="handStatus">Idle</strong></div>
+          </div>
+          <div class="diag">
+            <h3>Diagnostics</h3>
+            <p id="errorDetails">No errors.</p>
+            <pre id="initLog"></pre>
           </div>
         </section>
 
@@ -61,6 +70,8 @@
         </section>
       </aside>
     </div>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
