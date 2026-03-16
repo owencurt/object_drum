@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Object Drum</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <main class="stage-card">
+        <header class="stage-header">
+          <div>
+            <h1>Object Drum</h1>
+            <p>Hit objects with your index fingertip to play percussion.</p>
+          </div>
+          <button id="startBtn">Start Camera</button>
+        </header>
+        <div class="canvas-wrap">
+          <canvas id="stageCanvas" width="960" height="540"></canvas>
+          <video id="webcam" autoplay playsinline muted></video>
+          <div id="statusBadge" class="status-badge">Idle</div>
+        </div>
+      </main>
+
+      <aside class="panel">
+        <section>
+          <h2>Session</h2>
+          <div class="stat-grid">
+            <div><span>Hits</span><strong id="hitCount">0</strong></div>
+            <div><span>Last Hit</span><strong id="lastHit">–</strong></div>
+            <div><span>FPS</span><strong id="fps">0</strong></div>
+            <div><span>Models</span><strong id="modelStatus">Loading…</strong></div>
+          </div>
+        </section>
+
+        <section>
+          <h2>Controls</h2>
+          <label>Confidence <span id="confValue">0.55</span>
+            <input id="confidence" type="range" min="0.2" max="0.9" step="0.01" value="0.55" />
+          </label>
+          <label>Hit Cooldown (ms) <span id="cooldownValue">280</span>
+            <input id="cooldown" type="range" min="80" max="1000" step="20" value="280" />
+          </label>
+          <label>Smoothing <span id="smoothValue">0.35</span>
+            <input id="smoothing" type="range" min="0.1" max="0.85" step="0.05" value="0.35" />
+          </label>
+          <label>Stability Frames <span id="stableValue">3</span>
+            <input id="stability" type="range" min="1" max="8" step="1" value="3" />
+          </label>
+        </section>
+
+        <section>
+          <h2>Detected Objects</h2>
+          <ul id="objectList" class="object-list"></ul>
+        </section>
+
+        <section>
+          <h2>Sound Mapping</h2>
+          <div id="mappingList" class="mapping-list"></div>
+        </section>
+      </aside>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
