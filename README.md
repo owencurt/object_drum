@@ -43,6 +43,11 @@ And a diagnostics area that reports exact errors, including:
 
 Initialization steps are also logged in-browser console with `[init]` markers.
 
+## Class filtering
+
+- Person/human detections are intentionally filtered and never become playable objects.
+- See `DETECTABLE_OBJECTS.md` for model class coverage vs app-interactive class policy.
+
 ## Interaction behavior details
 
 - A hit triggers when an index fingertip enters a stable object track's box.
@@ -50,6 +55,7 @@ Initialization steps are also logged in-browser console with `[init]` markers.
 - Cooldown applies per object track.
 - Tiny detections are ignored (`minArea` guard in app state).
 - Sound selection depends only on object class mapping.
+- Person/human labels are excluded from render, hit, and mapping flows.
 - Multiple simultaneous hits can overlap (polyphony).
 
 ## Notes

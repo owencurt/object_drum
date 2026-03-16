@@ -34,6 +34,16 @@ const URLS = {
 const SOUND_TYPES = ['kick', 'snare', 'hihat', 'tom', 'clap', 'cowbell', 'shaker', 'conga', 'rim'];
 const DEFAULT_MAP = { bottle: 'cowbell', bowl: 'tom', cup: 'hihat', scissors: 'clap', book: 'snare', cellphone: 'rim', keyboard: 'kick', spoon: 'shaker' };
 
+const BLOCKED_CLASS_ALIASES = new Set(['person', 'people', 'human', 'man', 'woman', 'boy', 'girl']);
+
+function normalizeLabel(label) {
+  return String(label || '').toLowerCase().trim().replace(/[_-]+/g, ' ');
+}
+
+function isBlockedClass(label) {
+  return BLOCKED_CLASS_ALIASES.has(normalizeLabel(label));
+}
+
 const state = {
   detector: null,
   handLandmarker: null,
@@ -56,7 +66,8 @@ const state = {
   },
   audio: null,
   running: false,
-  fpsSamples: []
+  fpsSamples: [],
+  lastMappingKey: ''
 };
 
 function logInit(message) {
@@ -233,7 +244,7 @@ function updateTracks(predictions) {
 
   predictions.forEach((p) => {
     const [x, y, w, h] = p.bbox;
-    if (p.score < state.settings.confidence || w * h < state.settings.minArea) return;
+    if (isBlockedClass(p.class) || p.score < state.settings.confidence || w * h < state.settings.minArea) return;
 
     let bestId = null;
     let bestIou = 0;
@@ -277,7 +288,17 @@ function updateTracks(predictions) {
 }
 
 function updateMappingsUi() {
-  const labels = Array.from(new Set(Array.from(state.tracked.values()).map((t) => t.label))).sort();
+  const labels = Array.from(new Set(Array.from(state.tracked.values())
+    .map((t) => t.label)
+    .filter((label) => !isBlockedClass(label)))).sort();
+  const nextKey = labels.join('|');
+
+  const active = document.activeElement;
+  const interactingWithMappingSelect = active && mappingListEl.contains(active) && active.tagName === 'SELECT';
+  if (interactingWithMappingSelect) return;
+  if (nextKey === state.lastMappingKey) return;
+
+  state.lastMappingKey = nextKey;
   mappingListEl.innerHTML = '';
   labels.forEach((label) => {
     const row = document.createElement('div');
@@ -285,12 +306,12 @@ function updateMappingsUi() {
     const span = document.createElement('span');
     span.textContent = label;
     const sel = document.createElement('select');
-    SOUND_TYPES.forEach((s) => {
-      const o = document.createElement('option');
-      o.value = s;
-      o.textContent = s;
-      if ((state.soundMap[label] || assignDefaultSound(label)) === s) o.selected = true;
-      sel.appendChild(o);
+    SOUND_TYPES.forEach((soundName) => {
+      const option = document.createElement('option');
+      option.value = soundName;
+      option.textContent = soundName;
+      if ((state.soundMap[label] || assignDefaultSound(label)) === soundName) option.selected = true;
+      sel.appendChild(option);
     });
     sel.addEventListener('change', () => {
       state.soundMap[label] = sel.value;
@@ -303,7 +324,7 @@ function updateMappingsUi() {
 
 function updateObjectList() {
   const active = Array.from(state.tracked.values())
-    .filter((t) => t.seenFrames >= state.settings.stabilityFrames)
+    .filter((t) => t.seenFrames >= state.settings.stabilityFrames && !isBlockedClass(t.label))
     .sort((a, b) => b.score - a.score);
   objectListEl.innerHTML = active.length
     ? active.map((t) => `<li><span>${t.label}</span><strong>${Math.round(t.score * 100)}%</strong></li>`).join('')
@@ -514,7 +535,7 @@ window.addEventListener('error', (event) => {
 });
 
 startBtn.addEventListener('click', start);
-logInit('Booted. Click "Start Camera" to begin.');
+logInit('Booted. Click "Start Camera" to begin. Person/human classes are filtered out.');
 loadModels().catch((err) => {
   logInit(`Background model preload failed: ${statusText(err)}`);
 });
