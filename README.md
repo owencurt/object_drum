@@ -1,13 +1,13 @@
 # Object Drum (Local MVP)
 
-A polished local webcam instrument that detects household objects, tracks fingertips, and triggers percussion when an index fingertip enters a tracked object's box.
+A polished local webcam instrument that detects household objects + tracks both hands and triggers percussion when your index fingertip *enters* an object's box.
 
 ## Why this stack
 
 - **Static HTML/CSS/vanilla JS**: zero-build local run with very low setup friction.
-- **TensorFlow.js COCO-SSD (`lite_mobilenet_v2`)**: practical pretrained detector for common objects in browser.
-- **MediaPipe Hand Landmarker (Tasks Vision)**: reliable two-hand fingertip tracking.
-- **Web Audio API synthesis**: low-latency polyphonic percussion without bundled sample files.
+- **TensorFlow.js COCO-SSD (`lite_mobilenet_v2`)**: practical, pretrained common-object detector that runs in-browser locally with no server.
+- **MediaPipe Hand Landmarker (Tasks Vision)**: reliable 2-hand fingertip tracking with good real-time performance.
+- **Web Audio API synthesis**: no audio assets needed, polyphonic percussion playback, low latency.
 
 ## Run
 
@@ -17,45 +17,55 @@ npm run dev
 
 (or `python3 -m http.server 5173`)
 
-Open:
+Then open:
 
 ```text
 http://localhost:5173
 ```
 
-> Use `localhost`/`127.0.0.1` (or HTTPS). Webcam APIs require secure context.
+> Use `localhost` (or `127.0.0.1`) — not `file://` and not arbitrary insecure origins — because webcam access requires a secure context.
 
-## What changed for persistence + recall
+## Startup diagnostics now included
 
-- Added a **tracking-by-detection layer** on top of raw model outputs.
-- Tracks now survive temporary misses (miss counters + stale timeout) instead of disappearing immediately.
-- Track association uses **class + IoU + center-distance matching**.
-- Track boxes are smoothed every update to reduce jitter.
-- Tracks are only expired after meaningful absence (`maxMisses`, stale age, edge-leave logic).
-- Confirmed/visible tracks stay consistent for labels, hit logic, and sound mappings.
+The UI now shows separate startup statuses for:
 
-## Detection tuning and class prioritization
+- Camera
+- Object Detector
+- Hand Tracker
+- Overall Model Bundle
 
-- Detection cadence tightened (`~90ms`) and max detections increased (`35`) for better recall of smaller/background objects.
-- Default camera request favors higher resolution (`1600x900` ideal) to help background object detection.
-- Indoor/desk classes are **prioritized** for creation/visibility.
-- Outdoor/road clutter classes are **suppressed** (e.g., bike/car/bus/train/etc.) to reduce UI noise.
-- Person/human labels remain fully filtered out.
+And a diagnostics area that reports exact errors, including:
 
-## Diagnostics
+- permission denied / camera missing / camera busy messages
+- exact CDN import URL failures
+- exact model resource URL failures
+- runtime-loop failures
 
-The UI shows separate startup status for Camera / Detector / Hand Tracker / Model Bundle and includes an on-screen diagnostics log + explicit startup/runtime errors.
+Initialization steps are also logged in-browser console with `[init]` markers.
 
-## Class support details
+## Class filtering
 
-See `DETECTABLE_OBJECTS.md` for:
-- model-supported class scope,
-- direct vs approximate support for requested dorm/desk items,
-- intentionally filtered classes,
-- unsupported items and limitations.
+- Person/human detections are intentionally filtered and never become playable objects.
+- See `DETECTABLE_OBJECTS.md` for model class coverage vs app-interactive class policy.
 
-## Remaining practical limitations
+## Interaction behavior details
 
-- COCO-SSD class coverage is fixed to COCO-style categories; unsupported custom labels cannot be detected directly.
-- Small/occluded objects remain sensitive to lighting, blur, and framing.
-- CDN/network restrictions can block model startup.
+- A hit triggers when an index fingertip enters a stable object track's box.
+- One hit per fingertip entry.
+- Cooldown applies per object track.
+- Tiny detections are ignored (`minArea` guard in app state).
+- Sound selection depends only on object class mapping.
+- Person/human labels are excluded from render, hit, and mapping flows.
+- Multiple simultaneous hits can overlap (polyphony).
+
+## Notes
+
+- `favicon.ico` 404s were harmless and unrelated to model/camera startup; a `favicon.svg` is now included to remove this server-log noise.
+- First model load downloads model assets from CDN.
+
+## Practical limitations
+
+- COCO-SSD class coverage is limited to pretrained COCO categories.
+- Fast movement/lighting issues can still cause detection jitter.
+- Browser performance varies by hardware/browser.
+- Network/firewall rules that block CDN URLs will prevent model startup (now explicitly reported in diagnostics).
