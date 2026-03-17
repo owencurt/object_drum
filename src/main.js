@@ -35,14 +35,46 @@ const stableValue = document.getElementById('stableValue');
 const URLS = {
   mpTasks: 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/+esm',
   mpWasmRoot: 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm',
-  mpHandTask: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task'
+  mpHandTask: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+  transformers: 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2'
 };
+
+const OPEN_VOCAB_MODEL_ID = 'Xenova/owlvit-base-patch32';
+const LOCAL_MODEL_ROOT = '/models/';
 
 const STAGE = { width: 720, height: 1280 };
 const SOUND_TYPES = ['kick', 'snare', 'hihat', 'tom', 'clap', 'cowbell', 'shaker', 'conga', 'rim'];
-const DEFAULT_MAP = { bottle: 'cowbell', bowl: 'tom', cup: 'hihat', scissors: 'clap', book: 'snare', 'cell phone': 'rim', keyboard: 'kick', spoon: 'shaker', laptop: 'tom', mouse: 'hihat', remote: 'clap', backpack: 'conga', 'potted plant': 'shaker' };
+const DEFAULT_MAP = {
+  bottle: 'cowbell', bowl: 'tom', cup: 'hihat', mug: 'hihat', scissors: 'clap', book: 'snare', notebook: 'snare',
+  'cell phone': 'rim', keyboard: 'kick', spoon: 'shaker', laptop: 'tom', mouse: 'hihat', remote: 'clap',
+  backpack: 'conga', 'potted plant': 'shaker', plant: 'shaker', pen: 'rim', pencil: 'rim', marker: 'clap',
+  headphones: 'conga', camera: 'cowbell', candle: 'tom', fan: 'kick', tissue: 'shaker', 'tissue box': 'snare',
+  'charging cable': 'shaker'
+};
 const BLOCKED_CLASS_ALIASES = new Set(['person', 'people', 'human', 'man', 'woman', 'boy', 'girl']);
-const INDOOR_PRIORITY = new Set(['book', 'cell phone', 'keyboard', 'mouse', 'laptop', 'remote', 'backpack', 'bottle', 'cup', 'bowl', 'scissors', 'spoon', 'potted plant', 'vase']);
+const INDOOR_PRIORITY = new Set([
+  'book', 'notebook', 'cell phone', 'keyboard', 'mouse', 'laptop', 'remote', 'backpack', 'bottle', 'cup', 'mug',
+  'bowl', 'scissors', 'spoon', 'potted plant', 'plant', 'vase', 'pen', 'pencil', 'marker', 'headphones',
+  'camera', 'fan', 'candle', 'tissue', 'tissue box', 'charging cable'
+]);
+
+const OPEN_VOCAB_PROMPTS = [
+  'pen', 'pencil', 'marker', 'notebook', 'mug', 'charger', 'charging cable', 'headphones',
+  'camera', 'tissue box', 'tissue', 'candle', 'flower', 'desk fan', 'plant pot'
+];
+
+const CANONICAL_LABELS = {
+  charger: 'charging cable',
+  cable: 'charging cable',
+  'usb cable': 'charging cable',
+  'charging cord': 'charging cable',
+  'desk fan': 'fan',
+  flower: 'plant',
+  'plant pot': 'potted plant',
+  mug: 'cup',
+  cellphone: 'cell phone',
+  phone: 'cell phone'
+};
 
 const DETECTION_CONFIG = {
   modelBase: 'mobilenet_v1',
@@ -51,14 +83,27 @@ const DETECTION_CONFIG = {
   minArea: 900,
   minRawScore: 0.12,
   trackKeepAliveMs: 1400,
-  maxMisses: 18
+  maxMisses: 18,
+  openVocabEveryMs: 520,
+  openVocabThreshold: 0.15,
+  detectorMergeIou: 0.56,
+  deepScanEveryMs: 2200,
+  deepScanDurationMs: 1100,
+  deepScanMaxBoxes: 85,
+  deepScanMinRawScore: 0.07,
+  deepScanOpenVocabThreshold: 0.11,
+  staticBackgroundMode: true,
+  sceneSampleEveryMs: 320,
+  sceneShiftThreshold: 34
 };
 
 const state = {
   detector: null,
+  openVocabDetector: null,
   handLandmarker: null,
   modelsLoadPromise: null,
   lastDetectionAt: 0,
+  lastOpenVocabAt: 0,
   tracked: new Map(),
   rawDetections: [],
   nextTrackId: 1,
@@ -82,17 +127,173 @@ const state = {
   audio: null,
   running: false,
   fpsSamples: [],
-  lastMappingKey: ''
+  lastMappingKey: '',
+  detectorStatusBySource: { coco: 'idle', openvocab: 'idle' },
+  detectorDetailBySource: { coco: '', openvocab: '' },
+  deepScanUntil: 0,
+  lastDeepScanAt: 0,
+  sceneCanvas: null,
+  sceneCtx: null,
+  sceneFingerprint: null,
+  lastSceneSampleAt: 0
 };
 
 function normalizeLabel(label) {
-  return String(label || '').toLowerCase().trim().replace(/[_-]+/g, ' ');
+  const normalized = String(label || '').toLowerCase().trim().replace(/[_-]+/g, ' ');
+  return CANONICAL_LABELS[normalized] || normalized;
 }
 function isBlockedClass(label) { return BLOCKED_CLASS_ALIASES.has(normalizeLabel(label)); }
 function isIndoorPriority(label) { return INDOOR_PRIORITY.has(normalizeLabel(label)); }
 function labelThreshold(label) {
   const base = state.settings.confidence;
   return isIndoorPriority(label) ? base : Math.min(0.92, base + 0.06);
+}
+
+
+function detectorStatusWithDetail(source) {
+  const status = state.detectorStatusBySource[source];
+  const detail = state.detectorDetailBySource[source];
+  return detail ? `${status} (${detail})` : status;
+}
+
+function updateDetectorSummary() {
+  detectorStatusEl.textContent = `COCO:${detectorStatusWithDetail('coco')} / OV:${detectorStatusWithDetail('openvocab')}`;
+}
+
+function setDetectorSourceStatus(source, status, detail = '') {
+  state.detectorStatusBySource[source] = status;
+  state.detectorDetailBySource[source] = detail;
+  updateDetectorSummary();
+}
+
+function toUnifiedPrediction({ label, score, bbox, source }) {
+  return { class: normalizeLabel(label), score, bbox, source };
+}
+
+function dedupePredictions(predictions) {
+  const sorted = [...predictions].sort((a, b) => b.score - a.score);
+  const kept = [];
+  sorted.forEach((p) => {
+    const clash = kept.some((k) => {
+      if (k.class !== p.class) return false;
+      const a = { x: p.bbox[0], y: p.bbox[1], w: p.bbox[2], h: p.bbox[3] };
+      const b = { x: k.bbox[0], y: k.bbox[1], w: k.bbox[2], h: k.bbox[3] };
+      return iou(a, b) >= DETECTION_CONFIG.detectorMergeIou;
+    });
+    if (!clash) kept.push(p);
+  });
+  return kept;
+}
+
+function ensureSceneSampler() {
+  if (state.sceneCanvas) return;
+  state.sceneCanvas = document.createElement('canvas');
+  state.sceneCanvas.width = 32;
+  state.sceneCanvas.height = 18;
+  state.sceneCtx = state.sceneCanvas.getContext('2d', { willReadFrequently: true });
+}
+
+function sampleSceneFingerprint() {
+  ensureSceneSampler();
+  if (!state.sceneCtx || !video.videoWidth || !video.videoHeight) return null;
+  state.sceneCtx.drawImage(video, 0, 0, state.sceneCanvas.width, state.sceneCanvas.height);
+  const data = state.sceneCtx.getImageData(0, 0, state.sceneCanvas.width, state.sceneCanvas.height).data;
+  const bins = [];
+  for (let i = 0; i < data.length; i += 4) bins.push((data[i] + data[i + 1] + data[i + 2]) / 3);
+  return bins;
+}
+
+function sceneDifference(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
+  let sum = 0;
+  for (let i = 0; i < a.length; i += 1) sum += Math.abs(a[i] - b[i]);
+  return sum / a.length;
+}
+
+function clearTracksForSceneShift() {
+  if (!state.tracked.size) return;
+  state.tracked.clear();
+  state.cooldownByTrack.clear();
+  state.insideState.clear();
+  state.holdByPair.clear();
+  state.lastMappingKey = '';
+  logInit('Scene shift detected: cleared persisted tracks for re-scan.');
+}
+
+function monitorSceneShift(now) {
+  if (!DETECTION_CONFIG.staticBackgroundMode) return;
+  if (now - state.lastSceneSampleAt < DETECTION_CONFIG.sceneSampleEveryMs) return;
+  state.lastSceneSampleAt = now;
+
+  const sample = sampleSceneFingerprint();
+  if (!sample) return;
+  if (!state.sceneFingerprint) {
+    state.sceneFingerprint = sample;
+    return;
+  }
+
+  const diff = sceneDifference(state.sceneFingerprint, sample);
+  if (diff >= DETECTION_CONFIG.sceneShiftThreshold) {
+    state.sceneFingerprint = sample;
+    clearTracksForSceneShift();
+    state.deepScanUntil = now + DETECTION_CONFIG.deepScanDurationMs;
+    state.lastDeepScanAt = now;
+  }
+}
+
+function classifyOpenVocabError(err) {
+  const text = statusText(err);
+  if (/\/models\//i.test(text) && /404|not found|failed to fetch/i.test(text)) return 'missing-local-model-files';
+  if (/401|403|429|cors|network|failed to fetch|load failed/i.test(text)) return 'network-or-fetch-error';
+  if (/config|tokenizer|preprocessor|onnx|model_quantized/i.test(text)) return 'bad-model-files-or-path';
+  if (/pipeline|unsupported|backend|wasm|onnxruntime/i.test(text)) return 'runtime-incompatible';
+  return 'unknown-error';
+}
+
+async function probeLocalOpenVocabModel() {
+  const checkUrl = `${LOCAL_MODEL_ROOT}${OPEN_VOCAB_MODEL_ID}/config.json`;
+  try {
+    const res = await fetch(checkUrl, { method: 'HEAD', cache: 'no-store' });
+    return { exists: res.ok, checkUrl, status: res.status };
+  } catch (err) {
+    return { exists: false, checkUrl, status: 'fetch-error', error: statusText(err) };
+  }
+}
+
+function applyOpenVocabEnv(transformers, useLocal) {
+  const { env } = transformers;
+  env.useBrowserCache = true;
+  env.allowRemoteModels = !useLocal;
+  env.allowLocalModels = useLocal;
+  env.localModelPath = LOCAL_MODEL_ROOT;
+}
+
+async function detectOpenVocab(thresholdOverride = DETECTION_CONFIG.openVocabThreshold) {
+  if (!state.openVocabDetector) return [];
+  try {
+    const outputs = await state.openVocabDetector(video, OPEN_VOCAB_PROMPTS, {
+      threshold: thresholdOverride,
+      percentage: false
+    });
+    return (outputs || []).map((o) => {
+      const box = o.box || {};
+      const x = box.xmin ?? box.x ?? 0;
+      const y = box.ymin ?? box.y ?? 0;
+      const xmax = box.xmax ?? (x + (box.width || 0));
+      const ymax = box.ymax ?? (y + (box.height || 0));
+      return toUnifiedPrediction({
+        label: o.label,
+        score: Number(o.score || 0),
+        bbox: [x, y, Math.max(0, xmax - x), Math.max(0, ymax - y)],
+        source: 'openvocab'
+      });
+    });
+  } catch (err) {
+    const reason = classifyOpenVocabError(err);
+    setDetectorSourceStatus('openvocab', 'error', reason);
+    logInit(`Open-vocab detection failed (${reason}): ${statusText(err)}`);
+    return [];
+  }
 }
 
 function logInit(message) {
@@ -198,7 +399,8 @@ async function loadModels() {
   if (state.modelsLoadPromise) return state.modelsLoadPromise;
   state.modelsLoadPromise = (async () => {
     setComponentStatus('model', 'Loading');
-    setComponentStatus('detector', 'Loading');
+    setDetectorSourceStatus('coco', 'loading');
+    setDetectorSourceStatus('openvocab', 'loading');
     setComponentStatus('hand', 'Loading');
     statusBadge.textContent = 'Loading models…';
     try {
@@ -207,10 +409,46 @@ async function loadModels() {
       if (!globalThis.tf) throw new Error('TensorFlow.js global failed to load from CDN script tag.');
       if (!cocoSsd?.load) throw new Error('COCO-SSD global failed to load from CDN script tag.');
 
-      detectorModelEl.textContent = `COCO-SSD (${DETECTION_CONFIG.modelBase})`;
+      detectorModelEl.textContent = `Hybrid: COCO-SSD (${DETECTION_CONFIG.modelBase}) + OWLViT open-vocab`;
       logInit(`Loading detector model: COCO-SSD (${DETECTION_CONFIG.modelBase})`);
       state.detector = await cocoSsd.load({ base: DETECTION_CONFIG.modelBase });
-      setComponentStatus('detector', 'Ready');
+      setDetectorSourceStatus('coco', 'ready');
+
+      try {
+        logInit('Loading open-vocabulary detector (OWLViT)...');
+        const transformers = await importModule(URLS.transformers, 'Transformers.js');
+        const localProbe = await probeLocalOpenVocabModel();
+        const tryLocalFirst = localProbe.exists;
+
+        logInit(`OV local probe: ${localProbe.checkUrl} -> ${localProbe.status}`);
+
+        if (tryLocalFirst) {
+          try {
+            applyOpenVocabEnv(transformers, true);
+            logInit(`Open-vocab model source: ${LOCAL_MODEL_ROOT}${OPEN_VOCAB_MODEL_ID}/...`);
+            state.openVocabDetector = await transformers.pipeline('zero-shot-object-detection', OPEN_VOCAB_MODEL_ID);
+            setDetectorSourceStatus('openvocab', 'ready', 'local');
+          } catch (localErr) {
+            const reason = classifyOpenVocabError(localErr);
+            logInit(`Local OV load failed (${reason}) from ${LOCAL_MODEL_ROOT}${OPEN_VOCAB_MODEL_ID}/...: ${statusText(localErr)}`);
+            logInit(`Retrying OV model from remote source: ${OPEN_VOCAB_MODEL_ID}`);
+            applyOpenVocabEnv(transformers, false);
+            state.openVocabDetector = await transformers.pipeline('zero-shot-object-detection', OPEN_VOCAB_MODEL_ID);
+            setDetectorSourceStatus('openvocab', 'ready', 'remote-after-local-fail');
+          }
+        } else {
+          applyOpenVocabEnv(transformers, false);
+          logInit(`Open-vocab model source: remote huggingface (${OPEN_VOCAB_MODEL_ID})`);
+          if (localProbe.status === 404) logInit(`Local OV assets missing at ${localProbe.checkUrl}; using remote.`);
+          state.openVocabDetector = await transformers.pipeline('zero-shot-object-detection', OPEN_VOCAB_MODEL_ID);
+          setDetectorSourceStatus('openvocab', 'ready', 'remote');
+        }
+      } catch (err) {
+        const reason = classifyOpenVocabError(err);
+        setDetectorSourceStatus('openvocab', 'degraded', reason);
+        setError(`Open-vocab detector unavailable (${reason}). Continuing with COCO fallback. ${statusText(err)}`);
+        logInit(`Open-vocab model unavailable (${reason}); continuing with COCO only. ${statusText(err)}`);
+      }
 
       const mediapipe = await importModule(URLS.mpTasks, 'MediaPipe Tasks Vision');
       await verifyUrl(URLS.mpHandTask, 'Hand landmark model');
@@ -228,10 +466,11 @@ async function loadModels() {
       setComponentStatus('model', 'Ready');
       if (!state.running) statusBadge.textContent = 'Models ready';
       setError('No errors.');
-      logInit(`Detector config: conf=${state.settings.confidence}, maxBoxes=${DETECTION_CONFIG.maxNumBoxes}, detectEvery=${DETECTION_CONFIG.detectEveryMs}ms, minArea=${state.settings.minArea}`);
+      logInit(`Detector config: conf=${state.settings.confidence}, maxBoxes=${DETECTION_CONFIG.maxNumBoxes}, detectEvery=${DETECTION_CONFIG.detectEveryMs}ms, openVocabEvery=${DETECTION_CONFIG.openVocabEveryMs}ms, minArea=${state.settings.minArea}`);
     } catch (err) {
       setComponentStatus('model', 'Failed');
-      if (!state.detector) setComponentStatus('detector', 'Failed');
+      if (!state.detector) setDetectorSourceStatus('coco', 'failed');
+      if (!state.openVocabDetector) setDetectorSourceStatus('openvocab', 'failed', 'startup-failed');
       if (!state.handLandmarker) setComponentStatus('hand', 'Failed');
       statusBadge.textContent = 'Model load failed';
       setError(`Model initialization failed. ${statusText(err)}`);
@@ -294,7 +533,7 @@ function iou(a, b) {
   return inter ? inter / (a.w * a.h + b.w * b.h - inter) : 0;
 }
 
-function updateTracks(predictions) {
+function updateTracks(predictions, options = {}) {
   const now = performance.now();
   const unmatched = new Set(state.tracked.keys());
   const cleaned = [];
@@ -304,8 +543,9 @@ function updateTracks(predictions) {
     const [vx, vy, vw, vh] = p.bbox;
     const box = videoToStageBox(vx, vy, vw, vh);
     if (!box) return;
-    if (isBlockedClass(label) || p.score < DETECTION_CONFIG.minRawScore || box.w * box.h < state.settings.minArea) return;
-    cleaned.push({ ...p, class: label, box });
+    const minRawScore = p.minScoreOverride ?? options.minRawScore ?? DETECTION_CONFIG.minRawScore;
+    if (isBlockedClass(label) || p.score < minRawScore || box.w * box.h < state.settings.minArea) return;
+    cleaned.push({ ...p, class: label, box, source: p.source || 'coco' });
   });
 
   state.rawDetections = cleaned;
@@ -356,6 +596,9 @@ function updateTracks(predictions) {
   unmatched.forEach((id) => {
     const t = state.tracked.get(id);
     t.missFrames += 1;
+
+    if (DETECTION_CONFIG.staticBackgroundMode) return;
+
     const tooLongMissing = now - t.lastSeen > DETECTION_CONFIG.trackKeepAliveMs || t.missFrames > DETECTION_CONFIG.maxMisses;
     if (tooLongMissing) {
       state.tracked.delete(id);
@@ -413,7 +656,7 @@ function updateObjectList() {
 
   rawListEl.innerHTML = state.settings.debugRaw
     ? (state.rawDetections.length
-      ? state.rawDetections.slice(0, 20).map((d) => `<li><span>${d.class}</span><strong>${Math.round(d.score * 100)}%</strong></li>`).join('')
+      ? state.rawDetections.slice(0, 20).map((d) => `<li><span>${d.class} <em>(${d.source})</em></span><strong>${Math.round(d.score * 100)}%</strong></li>`).join('')
       : '<li><span>No raw detections</span><strong>–</strong></li>')
     : '<li><span>Debug mode off</span><strong>–</strong></li>';
 }
@@ -590,9 +833,30 @@ async function step() {
   if (!state.running) return;
   const now = performance.now();
   try {
+    monitorSceneShift(now);
+
     if (now - state.lastDetectionAt > DETECTION_CONFIG.detectEveryMs) {
-      const preds = await state.detector.detect(video, DETECTION_CONFIG.maxNumBoxes);
-      updateTracks(preds);
+      const shouldDeepScan = now < state.deepScanUntil || now - state.lastDeepScanAt > DETECTION_CONFIG.deepScanEveryMs;
+      if (shouldDeepScan && now - state.lastDeepScanAt > DETECTION_CONFIG.deepScanEveryMs) {
+        state.deepScanUntil = now + DETECTION_CONFIG.deepScanDurationMs;
+        state.lastDeepScanAt = now;
+      }
+
+      const deepMode = now < state.deepScanUntil;
+      const cocoMaxBoxes = deepMode ? DETECTION_CONFIG.deepScanMaxBoxes : DETECTION_CONFIG.maxNumBoxes;
+      const cocoPreds = (await state.detector.detect(video, cocoMaxBoxes))
+        .map((p) => ({ ...toUnifiedPrediction({ label: p.class, score: p.score, bbox: p.bbox, source: 'coco' }), minScoreOverride: deepMode ? DETECTION_CONFIG.deepScanMinRawScore : undefined }));
+
+      let openVocabPreds = [];
+      const openVocabEvery = deepMode ? Math.max(280, DETECTION_CONFIG.openVocabEveryMs * 0.55) : DETECTION_CONFIG.openVocabEveryMs;
+      if (now - state.lastOpenVocabAt > openVocabEvery) {
+        const ovThreshold = deepMode ? DETECTION_CONFIG.deepScanOpenVocabThreshold : DETECTION_CONFIG.openVocabThreshold;
+        openVocabPreds = await detectOpenVocab(ovThreshold);
+        state.lastOpenVocabAt = now;
+      }
+
+      const merged = dedupePredictions([...cocoPreds, ...openVocabPreds]);
+      updateTracks(merged, { minRawScore: deepMode ? DETECTION_CONFIG.deepScanMinRawScore : DETECTION_CONFIG.minRawScore });
       updateMappingsUi();
       updateObjectList();
       state.lastDetectionAt = now;
@@ -654,6 +918,9 @@ async function start() {
     canvas.width = STAGE.width;
     canvas.height = STAGE.height;
     updateStageTransform();
+    state.sceneFingerprint = null;
+    state.lastSceneSampleAt = 0;
+    state.deepScanUntil = performance.now() + DETECTION_CONFIG.deepScanDurationMs;
     setComponentStatus('camera', 'Ready');
     logInit(`Camera ready ${video.videoWidth}x${video.videoHeight}; stage ${canvas.width}x${canvas.height} (9:16)`);
   } catch (err) {
@@ -677,7 +944,7 @@ async function start() {
 
   state.running = true;
   statusBadge.textContent = 'Live';
-  logInit('Live processing started with portrait 9:16 stage and quality-tuned detector.');
+  logInit('Live processing started with static-background persistence + periodic deep scans.');
   step();
 }
 
@@ -713,5 +980,5 @@ window.addEventListener('error', (event) => {
 });
 
 startBtn.addEventListener('click', start);
-logInit('Booted. Portrait 9:16 stage ready. Person/human classes are filtered out.');
+logInit('Booted. Hybrid detector ready (COCO + optional open-vocab). Person/human classes are filtered out.');
 loadModels().catch((err) => logInit(`Background model preload failed: ${statusText(err)}`));

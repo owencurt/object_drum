@@ -1,101 +1,75 @@
 # Detectable Objects in Object Drum
 
-This app uses **TensorFlow.js COCO-SSD** with base **`mobilenet_v1`**.
+## Previous stack (root cause)
 
-## 1) Detector fit assessment (for this project)
+The app originally used only **TensorFlow.js COCO-SSD** (`mobilenet_v1`).
 
-### Why prior quality was weak
+COCO is limited to fixed class labels (80 classes). It includes useful indoor labels like `book`, `cup`, `bottle`, `laptop`, `keyboard`, etc., but **does not include dedicated classes for pen/pencil/marker/headphones/tissue box/candle/charger cable**.
 
-In the previous setup, detection quality was limited by a combination of:
+So even with threshold tuning, those items often produced no result because the class space itself was missing.
 
-- lighter detector base (`lite_mobilenet_v2`) with weaker recall on cluttered indoor scenes
-- high default confidence for stable-track creation
-- modest camera input constraints
-- short track persistence window after misses
+## New stack (implemented)
 
-This caused missed small/background items and unstable object presence.
+A **layered detector architecture** is now used:
 
-### What changed now
+1. **COCO-SSD** (fast baseline)
+2. **OWL-ViT zero-shot detector** via Transformers.js (targeted open-vocabulary prompts)
+3. **Prediction merge + dedupe** before existing tracking/hit pipeline
 
-- switched detector base to `mobilenet_v1`
-- increased ideal camera resolution request
-- increased detection frequency and max returned boxes
-- added miss-tolerant track persistence
-- added indoor-priority thresholding and ranking
-- added optional raw-detection debug list
+Open-vocab prompts used:
 
-## 2) Model class coverage vs app behavior
+- `pen`, `pencil`, `marker`, `notebook`, `mug`, `charger`, `charging cable`, `headphones`
+- `camera`, `tissue box`, `tissue`, `candle`, `flower`, `desk fan`, `plant pot`
 
-COCO-SSD can detect COCO-family categories (80 classes), including many indoor-relevant classes such as:
+Canonical label normalization maps variants into stable app labels (e.g. `charger` → `charging cable`, `desk fan` → `fan`, `flower` → `plant`, `mug` → `cup`).
 
-- book
+## What should now work better
+
+### Strong baseline (COCO + tracking)
+
+- book / notebook (notebook may also come from open-vocab)
 - cell phone
 - keyboard
 - mouse
 - laptop
 - remote
-- backpack
 - bottle
-- cup
+- cup / mug
 - bowl
 - spoon
 - scissors
-- potted plant
-- vase
-
-The app still filters person/human classes from playable object flow.
-
-## 3) Requested objects: direct vs approximate vs unsupported
-
-### Directly represented by COCO class names
-
-- books
-- phone (`cell phone`)
-- cup / mug (`cup`)
-- bowl
-- bottle
-- scissors
-- spoon
-- keyboard
-- mouse
-- laptop
 - backpack
-- remote
-- plant pot / pot (`potted plant`)
+- potted plant / vase
 
-### Approximate only
+### Improved by open-vocabulary layer
 
-- notebook (often appears as `book`)
-- flower (often via `potted plant` or `vase` context)
-- polaroid/camera-like items (may be inconsistent)
-- desk lamp (no dedicated lamp class)
-- fan (no dedicated fan class)
-
-### Not reliably supported in COCO label space
-
-- candle
-- vinyl records
-- tissue / tissue box
 - pen
 - pencil
+- marker
+- notebook (as explicit class, not only book approximation)
 - headphones
+- charging cable / charger (best-effort)
+- tissue / tissue box (best-effort)
+- candle (best-effort)
+- camera (best-effort)
+- fan (best-effort)
+- flower/plant variants (normalized to plant/potted plant)
 
-## 4) Real-world quality factors
+## Still not guaranteed
 
-Detection reliability still depends on:
+Even with open-vocab, these remain variable depending on scale/lighting/occlusion/model confidence:
 
-- lighting and contrast
-- distance/size in frame
-- camera angle
-- occlusion
-- motion blur
-- chosen confidence setting
+- thin cables at long distance
+- very small stationery objects far from camera
+- uncommon camera form factors (e.g., polaroid-style)
+- highly stylized decor objects
 
-## 5) Tuning locations in code
+## Practical tuning guidance
 
-Primary detection-quality settings are in `src/main.js`:
+If detection is noisy:
 
-- `DETECTION_CONFIG`
-- `INDOOR_PRIORITY`
-- `labelThreshold()`
-- track-expiry handling in `updateTracks()`
+- increase confidence slider,
+- keep objects larger in frame,
+- use raw debug list to inspect whether detections are coming from `coco` or `openvocab`.
+
+If OWL-ViT fails to load, app runs in COCO-only fallback mode.
