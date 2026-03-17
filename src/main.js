@@ -39,6 +39,9 @@ const URLS = {
   transformers: 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2'
 };
 
+const OPEN_VOCAB_MODEL_ID = 'Xenova/owlvit-base-patch32';
+const LOCAL_MODEL_ROOT = '/models/';
+
 const STAGE = { width: 720, height: 1280 };
 const SOUND_TYPES = ['kick', 'snare', 'hihat', 'tom', 'clap', 'cowbell', 'shaker', 'conga', 'rim'];
 const DEFAULT_MAP = {
@@ -117,7 +120,8 @@ const state = {
   running: false,
   fpsSamples: [],
   lastMappingKey: '',
-  detectorStatusBySource: { coco: 'idle', openvocab: 'idle' }
+  detectorStatusBySource: { coco: 'idle', openvocab: 'idle' },
+  detectorDetailBySource: { coco: '', openvocab: '' }
 };
 
 function normalizeLabel(label) {
@@ -132,14 +136,19 @@ function labelThreshold(label) {
 }
 
 
-function updateDetectorSummary() {
-  const coco = state.detectorStatusBySource.coco;
-  const open = state.detectorStatusBySource.openvocab;
-  detectorStatusEl.textContent = `COCO:${coco} / OV:${open}`;
+function detectorStatusWithDetail(source) {
+  const status = state.detectorStatusBySource[source];
+  const detail = state.detectorDetailBySource[source];
+  return detail ? `${status} (${detail})` : status;
 }
 
-function setDetectorSourceStatus(source, status) {
+function updateDetectorSummary() {
+  detectorStatusEl.textContent = `COCO:${detectorStatusWithDetail('coco')} / OV:${detectorStatusWithDetail('openvocab')}`;
+}
+
+function setDetectorSourceStatus(source, status, detail = '') {
   state.detectorStatusBySource[source] = status;
+  state.detectorDetailBySource[source] = detail;
   updateDetectorSummary();
 }
 
@@ -160,6 +169,33 @@ function dedupePredictions(predictions) {
     if (!clash) kept.push(p);
   });
   return kept;
+}
+
+function classifyOpenVocabError(err) {
+  const text = statusText(err);
+  if (/\/models\//i.test(text) && /404|not found|failed to fetch/i.test(text)) return 'missing-local-model-files';
+  if (/401|403|429|cors|network|failed to fetch|load failed/i.test(text)) return 'network-or-fetch-error';
+  if (/config|tokenizer|preprocessor|onnx|model_quantized/i.test(text)) return 'bad-model-files-or-path';
+  if (/pipeline|unsupported|backend|wasm|onnxruntime/i.test(text)) return 'runtime-incompatible';
+  return 'unknown-error';
+}
+
+async function probeLocalOpenVocabModel() {
+  const checkUrl = `${LOCAL_MODEL_ROOT}${OPEN_VOCAB_MODEL_ID}/config.json`;
+  try {
+    const res = await fetch(checkUrl, { method: 'HEAD', cache: 'no-store' });
+    return { exists: res.ok, checkUrl, status: res.status };
+  } catch (err) {
+    return { exists: false, checkUrl, status: 'fetch-error', error: statusText(err) };
+  }
+}
+
+function applyOpenVocabEnv(transformers, useLocal) {
+  const { env } = transformers;
+  env.useBrowserCache = true;
+  env.allowRemoteModels = !useLocal;
+  env.allowLocalModels = useLocal;
+  env.localModelPath = LOCAL_MODEL_ROOT;
 }
 
 async function detectOpenVocab() {
@@ -183,8 +219,9 @@ async function detectOpenVocab() {
       });
     });
   } catch (err) {
-    setDetectorSourceStatus('openvocab', 'error');
-    logInit(`Open-vocab detection failed: ${statusText(err)}`);
+    const reason = classifyOpenVocabError(err);
+    setDetectorSourceStatus('openvocab', 'error', reason);
+    logInit(`Open-vocab detection failed (${reason}): ${statusText(err)}`);
     return [];
   }
 }
@@ -310,11 +347,37 @@ async function loadModels() {
       try {
         logInit('Loading open-vocabulary detector (OWLViT)...');
         const transformers = await importModule(URLS.transformers, 'Transformers.js');
-        state.openVocabDetector = await transformers.pipeline('zero-shot-object-detection', 'Xenova/owlvit-base-patch32');
-        setDetectorSourceStatus('openvocab', 'ready');
+        const localProbe = await probeLocalOpenVocabModel();
+        const tryLocalFirst = localProbe.exists;
+
+        logInit(`OV local probe: ${localProbe.checkUrl} -> ${localProbe.status}`);
+
+        if (tryLocalFirst) {
+          try {
+            applyOpenVocabEnv(transformers, true);
+            logInit(`Open-vocab model source: ${LOCAL_MODEL_ROOT}${OPEN_VOCAB_MODEL_ID}/...`);
+            state.openVocabDetector = await transformers.pipeline('zero-shot-object-detection', OPEN_VOCAB_MODEL_ID);
+            setDetectorSourceStatus('openvocab', 'ready', 'local');
+          } catch (localErr) {
+            const reason = classifyOpenVocabError(localErr);
+            logInit(`Local OV load failed (${reason}) from ${LOCAL_MODEL_ROOT}${OPEN_VOCAB_MODEL_ID}/...: ${statusText(localErr)}`);
+            logInit(`Retrying OV model from remote source: ${OPEN_VOCAB_MODEL_ID}`);
+            applyOpenVocabEnv(transformers, false);
+            state.openVocabDetector = await transformers.pipeline('zero-shot-object-detection', OPEN_VOCAB_MODEL_ID);
+            setDetectorSourceStatus('openvocab', 'ready', 'remote-after-local-fail');
+          }
+        } else {
+          applyOpenVocabEnv(transformers, false);
+          logInit(`Open-vocab model source: remote huggingface (${OPEN_VOCAB_MODEL_ID})`);
+          if (localProbe.status === 404) logInit(`Local OV assets missing at ${localProbe.checkUrl}; using remote.`);
+          state.openVocabDetector = await transformers.pipeline('zero-shot-object-detection', OPEN_VOCAB_MODEL_ID);
+          setDetectorSourceStatus('openvocab', 'ready', 'remote');
+        }
       } catch (err) {
-        setDetectorSourceStatus('openvocab', 'degraded');
-        logInit(`Open-vocab model unavailable; continuing with COCO only. ${statusText(err)}`);
+        const reason = classifyOpenVocabError(err);
+        setDetectorSourceStatus('openvocab', 'degraded', reason);
+        setError(`Open-vocab detector unavailable (${reason}). Continuing with COCO fallback. ${statusText(err)}`);
+        logInit(`Open-vocab model unavailable (${reason}); continuing with COCO only. ${statusText(err)}`);
       }
 
       const mediapipe = await importModule(URLS.mpTasks, 'MediaPipe Tasks Vision');
@@ -337,7 +400,7 @@ async function loadModels() {
     } catch (err) {
       setComponentStatus('model', 'Failed');
       if (!state.detector) setDetectorSourceStatus('coco', 'failed');
-      if (!state.openVocabDetector) setDetectorSourceStatus('openvocab', 'failed');
+      if (!state.openVocabDetector) setDetectorSourceStatus('openvocab', 'failed', 'startup-failed');
       if (!state.handLandmarker) setComponentStatus('hand', 'Failed');
       statusBadge.textContent = 'Model load failed';
       setError(`Model initialization failed. ${statusText(err)}`);

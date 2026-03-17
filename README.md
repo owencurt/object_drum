@@ -34,10 +34,29 @@ http://localhost:5173
 
 > Use localhost/127.0.0.1 (or HTTPS). Webcam APIs require secure context.
 
+
+## Open-vocabulary model loading behavior
+
+The OV model (`Xenova/owlvit-base-patch32`) now loads with this strategy:
+
+1. Probe local path: `/models/Xenova/owlvit-base-patch32/config.json`
+2. If present, try loading locally first.
+3. If local assets are missing/broken, automatically retry from remote Hugging Face.
+4. If both fail, app degrades to COCO-only mode.
+
+This makes the default `npm run dev` static-server workflow work even when no local `/models/...` folder exists.
+
+If you want local OV assets, place the full exported model under:
+
+- `/models/Xenova/owlvit-base-patch32/`
+
+Required files include config/tokenizer/preprocessor and ONNX weights.
+
 ## Hybrid detector notes
 
 - First run may take longer because OWL-ViT weights download in-browser.
-- Session panel now shows detector status as `COCO:<state> / OV:<state>`.
+- Session panel now shows detector status as `COCO:<state> / OV:<state(detail)>` for clearer OV failure reasons.
+- Diagnostics log includes exact OV model source/probe path and fallback attempts.
 - Raw debug list shows source tag per detection (`coco` or `openvocab`).
 
 ## Controls
