@@ -1,28 +1,30 @@
 # Object Drum (Local MVP)
 
-A polished local webcam instrument that detects household objects, tracks both index fingertips, and triggers percussion when a fingertip enters an object's tracked box.
+A local webcam instrument that detects household objects, tracks both index fingertips, and triggers percussion when a fingertip enters an object's tracked box.
 
-## Detection-quality upgrade summary
+## Portrait 9:16 presentation layout
 
-This app now treats object detection quality as a full pipeline problem, not just a threshold tweak.
+The app is now intentionally framed for **vertical recording**:
 
-### What was changed
+- The main stage is a portrait **9:16 camera viewport**.
+- On smaller windows, controls stack below the stage.
+- On larger desktop windows, the portrait stage stays left and controls stay on the right.
+- The visual style, overlays, hit flashes, and sound interaction are preserved.
 
-- **Detector quality mode:** switched COCO-SSD base from `lite_mobilenet_v2` to **`mobilenet_v1`** for stronger object quality (at some performance cost).
-- **Higher camera input quality:** requests up to `1920x1080` ideal webcam resolution for better small/background object recall.
-- **Higher detection throughput:** tighter detection cadence and more returned boxes.
-- **Two-stage scoring:** low raw acceptance for debug/track updates + higher class-aware creation threshold for stable tracks.
-- **Miss-tolerant track persistence:** tracks now hold through temporary misses and age out later, reducing flicker/disappear behavior.
-- **Indoor class bias:** indoor/common desk classes are prioritized for track creation and ranking.
-- **Debug visibility:** optional raw detection panel plus detector model/config status in UI.
+This keeps demos easy to screen-record and repost to phone-first/social formats.
 
-## Why this detector choice
+## Detector quality approach
 
-We kept COCO-SSD but upgraded configuration/model base because:
+The app keeps COCO-SSD but uses a stronger quality-oriented setup:
 
-- It is still the most practical no-build browser option in this project.
-- `mobilenet_v1` generally gives better detection quality than `lite_mobilenet_v2` for indoor scenes.
-- It avoids introducing heavy new build/runtime dependencies while improving real-world recall.
+- `mobilenet_v1` base (better recall than the lighter base)
+- tighter inference cadence
+- higher max detections
+- miss-tolerant object track persistence
+- indoor-priority class bias
+- optional raw detection debug list
+
+Person/human detections remain filtered out from playable interaction.
 
 ## Run
 
@@ -32,37 +34,97 @@ npm run dev
 
 (or `python3 -m http.server 5173`)
 
-Open:
+Then open:
 
 ```text
 http://localhost:5173
 ```
 
-> Use `localhost` / `127.0.0.1` (or HTTPS). Webcam APIs require secure context.
+> Use localhost/127.0.0.1 (or HTTPS). Webcam APIs require secure context.
 
-## Key controls
+---
 
-- **Confidence:** base score threshold for creating stable tracks (indoor classes are allowed a bit earlier than non-priority classes).
-- **Smoothing:** dampens box jitter.
-- **Stability Frames:** number of consecutive updates before a track is treated as stable for UI/hits.
-- **Show raw detections:** debug panel to inspect what the detector sees before stable-track filtering.
+## Controls explained (what each one does)
 
-## Diagnostics in UI
+### 1) Confidence
 
-Session panel now shows:
+- **What it controls:** base score required before a raw detection is promoted to a stable playable track.
+- **Higher value:** fewer detections, cleaner results, more missed small/far objects.
+- **Lower value:** more detections and recall, but more false positives/noise.
+- **Effect on experience:** directly affects how often objects appear in tracking, mapping list, and hit targets.
 
-- active detector model
-- raw detection count
-- tracked object count
-- existing camera / detector / hand / model startup statuses
+If you want **more detections**, lower confidence gradually.
+If you want **fewer false positives**, raise confidence.
 
-## Class policy
+### 2) Hit Cooldown (ms)
 
-- Person/human classes are fully filtered out from playable object flow.
-- See `DETECTABLE_OBJECTS.md` for supported vs approximate vs unsupported classes for indoor/dorm items.
+- **What it controls:** minimum time before the same tracked object can retrigger another hit.
+- **Higher value:** fewer accidental rapid-fire retriggers while finger lingers.
+- **Lower value:** more responsive repeated hits, but easier to over-trigger.
+- **Effect on experience:** changes drum “playability” feel, not detector quality.
 
-## Practical limitations
+If you get **too many accidental hits**, increase cooldown.
+If hits feel **too slow**, decrease cooldown.
 
-- COCO label space still does **not** include some requested objects (e.g., vinyl, tissue box, pen/pencil, candle, headphones).
-- Low light, motion blur, and severe occlusion still degrade detection quality.
-- `mobilenet_v1` improves quality but may reduce FPS on slower machines.
+### 3) Smoothing
+
+- **What it controls:** how quickly track boxes adapt to new detection positions.
+- **Higher smoothing factor:** boxes follow motion faster but may jitter more.
+- **Lower smoothing factor:** boxes look steadier but lag behind movement.
+- **Effect on experience:** visual stability and hit alignment feel.
+
+If boxes are **jittery**, reduce smoothing a bit.
+If boxes feel **too sluggish**, increase smoothing.
+
+### 4) Stability Frames
+
+- **What it controls:** number of consecutive updates before a track is treated as stable/interactive.
+- **Higher value:** fewer flickers/false starts, but slower object activation.
+- **Lower value:** quicker activation, but noisier object presence.
+- **Effect on experience:** balance between responsiveness and stability.
+
+If objects appear/disappear too quickly, increase stability frames.
+If objects take too long to become playable, decrease it.
+
+### 5) Show raw detections (debug toggle)
+
+- **What it controls:** whether to show the raw detection list before stable-track filtering.
+- **Why useful:** helps diagnose whether misses come from model output or from post-processing/tracking thresholds.
+- **Effect on experience:** no sound/hit logic change; diagnostic visibility only.
+
+Use this when tuning confidence/stability to understand pipeline behavior.
+
+### 6) Sound mapping dropdowns
+
+- **What it controls:** per-object-class sound assignment.
+- **Effect on experience:** does not change detection/tracking; only changes sound output when hit triggers occur.
+
+---
+
+## Reading the status/debug panel
+
+Session stats include:
+
+- **Detector Model**: confirms active detector variant.
+- **Raw Detections**: number of model detections that passed minimal filtering.
+- **Tracked**: number of currently persisted tracks.
+- **Camera/Detector/Hand/Model statuses**: startup health per component.
+
+If raw detections are high but tracked is low, tuning is likely too strict.
+If raw detections are low, lighting/framing/model coverage is likely the main issue.
+
+## Recording recommendations
+
+- Keep browser window narrow enough that the portrait stage is dominant.
+- Ensure the full portrait frame is visible when screen recording.
+- Use consistent indoor lighting and avoid heavy motion blur.
+- Frame objects so they fill more of the portrait viewport for better recall.
+
+## Object coverage / limitations
+
+See `DETECTABLE_OBJECTS.md` for:
+
+- directly supported indoor classes,
+- approximate mappings,
+- unsupported requested items (e.g., candle, vinyl, tissue box, pen/pencil, headphones),
+- where to tune policy in code.

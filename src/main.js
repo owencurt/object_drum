@@ -37,6 +37,7 @@ const URLS = {
   mpHandTask: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task'
 };
 
+const STAGE = { width: 720, height: 1280 };
 const SOUND_TYPES = ['kick', 'snare', 'hihat', 'tom', 'clap', 'cowbell', 'shaker', 'conga', 'rim'];
 const DEFAULT_MAP = { bottle: 'cowbell', bowl: 'tom', cup: 'hihat', scissors: 'clap', book: 'snare', 'cell phone': 'rim', keyboard: 'kick', spoon: 'shaker', laptop: 'tom', mouse: 'hihat', remote: 'clap', backpack: 'conga', 'potted plant': 'shaker' };
 const BLOCKED_CLASS_ALIASES = new Set(['person', 'people', 'human', 'man', 'woman', 'boy', 'girl']);
@@ -46,7 +47,7 @@ const DETECTION_CONFIG = {
   modelBase: 'mobilenet_v1',
   detectEveryMs: 80,
   maxNumBoxes: 45,
-  minArea: 1200,
+  minArea: 900,
   minRawScore: 0.12,
   trackKeepAliveMs: 1400,
   maxMisses: 18
@@ -66,6 +67,7 @@ const state = {
   insideState: new Map(),
   cooldownByTrack: new Map(),
   soundMap: JSON.parse(localStorage.getItem('object-drum-map') || '{}'),
+  stageTransform: null,
   settings: {
     confidence: Number(confidenceInput.value),
     cooldownMs: Number(cooldownInput.value),
@@ -83,15 +85,8 @@ const state = {
 function normalizeLabel(label) {
   return String(label || '').toLowerCase().trim().replace(/[_-]+/g, ' ');
 }
-
-function isBlockedClass(label) {
-  return BLOCKED_CLASS_ALIASES.has(normalizeLabel(label));
-}
-
-function isIndoorPriority(label) {
-  return INDOOR_PRIORITY.has(normalizeLabel(label));
-}
-
+function isBlockedClass(label) { return BLOCKED_CLASS_ALIASES.has(normalizeLabel(label)); }
+function isIndoorPriority(label) { return INDOOR_PRIORITY.has(normalizeLabel(label)); }
 function labelThreshold(label) {
   const base = state.settings.confidence;
   return isIndoorPriority(label) ? base : Math.min(0.92, base + 0.06);
@@ -102,16 +97,8 @@ function logInit(message) {
   console.info('[init]', message);
   initLogEl.textContent = `${line}\n${initLogEl.textContent}`.split('\n').slice(0, 18).join('\n');
 }
-
-function setError(message) {
-  errorDetailsEl.textContent = message || 'No errors.';
-}
-
-function statusText(err) {
-  if (!err) return 'Unknown error';
-  return `${err.name || 'Error'}: ${err.message || String(err)}`;
-}
-
+function setError(message) { errorDetailsEl.textContent = message || 'No errors.'; }
+function statusText(err) { return !err ? 'Unknown error' : `${err.name || 'Error'}: ${err.message || String(err)}`; }
 function setComponentStatus(component, text) {
   if (component === 'model') modelStatusEl.textContent = text;
   if (component === 'camera') cameraStatusEl.textContent = text;
@@ -121,8 +108,7 @@ function setComponentStatus(component, text) {
 
 function ensureSecureContext() {
   const isLocalhost = ['localhost', '127.0.0.1', '::1'].includes(location.hostname);
-  if (window.isSecureContext || isLocalhost) return;
-  throw new Error(`Webcam requires secure context. Open via https:// or localhost (current origin: ${location.origin})`);
+  if (!window.isSecureContext && !isLocalhost) throw new Error(`Webcam requires secure context. Use localhost/https (origin: ${location.origin})`);
 }
 
 async function importModule(url, label) {
@@ -156,16 +142,17 @@ function playSound(type) {
   if (!state.audio) state.audio = new Ctx();
   if (state.audio.state === 'suspended') state.audio.resume();
   const now = state.audio.currentTime;
-  const output = state.audio.createGain();
-  output.gain.value = 0.9;
-  output.connect(state.audio.destination);
+  const out = state.audio.createGain();
+  out.gain.value = 0.9;
+  out.connect(state.audio.destination);
+
   const noiseBuffer = () => {
     const buffer = state.audio.createBuffer(1, state.audio.sampleRate * 0.25, state.audio.sampleRate);
-    const channel = buffer.getChannelData(0);
-    for (let i = 0; i < channel.length; i++) channel[i] = Math.random() * 2 - 1;
+    const ch = buffer.getChannelData(0);
+    for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1;
     return buffer;
   };
-  const hitTone = (freq, decay, wave = 'sine', gain = 0.8) => {
+  const tone = (freq, decay, wave = 'sine', gain = 0.8) => {
     const osc = state.audio.createOscillator();
     const g = state.audio.createGain();
     osc.type = wave;
@@ -173,34 +160,35 @@ function playSound(type) {
     osc.frequency.exponentialRampToValueAtTime(Math.max(50, freq * 0.25), now + decay);
     g.gain.setValueAtTime(gain, now);
     g.gain.exponentialRampToValueAtTime(0.001, now + decay);
-    osc.connect(g).connect(output);
+    osc.connect(g).connect(out);
     osc.start(now);
     osc.stop(now + decay);
   };
-  const hitNoise = (decay, filterFreq, gain = 0.35) => {
+  const noise = (decay, freq, gain = 0.35) => {
     const src = state.audio.createBufferSource();
     src.buffer = noiseBuffer();
-    const filter = state.audio.createBiquadFilter();
-    filter.type = 'highpass';
-    filter.frequency.value = filterFreq;
+    const f = state.audio.createBiquadFilter();
+    f.type = 'highpass';
+    f.frequency.value = freq;
     const g = state.audio.createGain();
     g.gain.setValueAtTime(gain, now);
     g.gain.exponentialRampToValueAtTime(0.001, now + decay);
-    src.connect(filter).connect(g).connect(output);
+    src.connect(f).connect(g).connect(out);
     src.start(now);
     src.stop(now + decay);
   };
+
   ({
-    kick: () => hitTone(160, 0.25, 'sine', 1),
-    snare: () => { hitNoise(0.2, 1200, 0.45); hitTone(220, 0.12, 'triangle', 0.25); },
-    hihat: () => hitNoise(0.08, 4500, 0.22),
-    tom: () => hitTone(210, 0.22, 'triangle', 0.65),
-    clap: () => { hitNoise(0.11, 1500, 0.4); setTimeout(() => hitNoise(0.08, 1700, 0.28), 22); },
-    cowbell: () => { hitTone(620, 0.16, 'square', 0.32); hitTone(840, 0.15, 'square', 0.22); },
-    shaker: () => hitNoise(0.05, 3800, 0.18),
-    conga: () => hitTone(280, 0.2, 'sine', 0.68),
-    rim: () => { hitTone(1200, 0.05, 'triangle', 0.2); hitNoise(0.03, 5500, 0.08); }
-  }[type] || (() => hitTone(220, 0.2)))();
+    kick: () => tone(160, 0.25, 'sine', 1),
+    snare: () => { noise(0.2, 1200, 0.45); tone(220, 0.12, 'triangle', 0.25); },
+    hihat: () => noise(0.08, 4500, 0.22),
+    tom: () => tone(210, 0.22, 'triangle', 0.65),
+    clap: () => { noise(0.11, 1500, 0.4); setTimeout(() => noise(0.08, 1700, 0.28), 22); },
+    cowbell: () => { tone(620, 0.16, 'square', 0.32); tone(840, 0.15, 'square', 0.22); },
+    shaker: () => noise(0.05, 3800, 0.18),
+    conga: () => tone(280, 0.2, 'sine', 0.68),
+    rim: () => { tone(1200, 0.05, 'triangle', 0.2); noise(0.03, 5500, 0.08); }
+  }[type] || (() => tone(220, 0.2)))();
 }
 
 async function loadModels() {
@@ -210,18 +198,16 @@ async function loadModels() {
     setComponentStatus('detector', 'Loading');
     setComponentStatus('hand', 'Loading');
     statusBadge.textContent = 'Loading models…';
-
     try {
       ensureSecureContext();
-      const tf = globalThis.tf;
       const cocoSsd = globalThis.cocoSsd;
-      if (!tf) throw new Error('TensorFlow.js global failed to load from CDN script tag.');
+      if (!globalThis.tf) throw new Error('TensorFlow.js global failed to load from CDN script tag.');
       if (!cocoSsd?.load) throw new Error('COCO-SSD global failed to load from CDN script tag.');
+
       detectorModelEl.textContent = `COCO-SSD (${DETECTION_CONFIG.modelBase})`;
       logInit(`Loading detector model: COCO-SSD (${DETECTION_CONFIG.modelBase})`);
       state.detector = await cocoSsd.load({ base: DETECTION_CONFIG.modelBase });
       setComponentStatus('detector', 'Ready');
-      logInit('Object detector ready');
 
       const mediapipe = await importModule(URLS.mpTasks, 'MediaPipe Tasks Vision');
       await verifyUrl(URLS.mpHandTask, 'Hand landmark model');
@@ -235,7 +221,6 @@ async function loadModels() {
         minTrackingConfidence: 0.4
       });
       setComponentStatus('hand', 'Ready');
-      logInit('Hand tracker ready');
 
       setComponentStatus('model', 'Ready');
       if (!state.running) statusBadge.textContent = 'Models ready';
@@ -246,13 +231,55 @@ async function loadModels() {
       if (!state.detector) setComponentStatus('detector', 'Failed');
       if (!state.handLandmarker) setComponentStatus('hand', 'Failed');
       statusBadge.textContent = 'Model load failed';
-      const msg = statusText(err);
-      setError(`Model initialization failed. ${msg}`);
-      logInit(`Model load failed: ${msg}`);
+      setError(`Model initialization failed. ${statusText(err)}`);
+      logInit(`Model load failed: ${statusText(err)}`);
       throw err;
     }
   })();
   return state.modelsLoadPromise;
+}
+
+function updateStageTransform() {
+  const vw = video.videoWidth || STAGE.width;
+  const vh = video.videoHeight || STAGE.height;
+  const cw = canvas.width;
+  const ch = canvas.height;
+  const scale = Math.max(cw / vw, ch / vh);
+  const srcW = cw / scale;
+  const srcH = ch / scale;
+  const srcX = (vw - srcW) / 2;
+  const srcY = (vh - srcH) / 2;
+  state.stageTransform = { vw, vh, cw, ch, srcX, srcY, srcW, srcH, mirror: true };
+}
+
+function videoToStagePoint(vx, vy) {
+  const t = state.stageTransform;
+  if (!t) return null;
+  const nx = (vx - t.srcX) / t.srcW;
+  const ny = (vy - t.srcY) / t.srcH;
+  const sx = nx * t.cw;
+  const sy = ny * t.ch;
+  const mx = t.mirror ? t.cw - sx : sx;
+  return { x: mx, y: sy };
+}
+
+function videoToStageBox(vx, vy, vw, vh) {
+  const p1 = videoToStagePoint(vx, vy);
+  const p2 = videoToStagePoint(vx + vw, vy + vh);
+  if (!p1 || !p2) return null;
+  let x = Math.min(p1.x, p2.x);
+  let y = Math.min(p1.y, p2.y);
+  let w = Math.abs(p2.x - p1.x);
+  let h = Math.abs(p2.y - p1.y);
+
+  const x2 = Math.min(canvas.width, x + w);
+  const y2 = Math.min(canvas.height, y + h);
+  x = Math.max(0, x);
+  y = Math.max(0, y);
+  w = x2 - x;
+  h = y2 - y;
+  if (w <= 0 || h <= 0) return null;
+  return { x, y, w, h };
 }
 
 function iou(a, b) {
@@ -271,9 +298,11 @@ function updateTracks(predictions) {
 
   predictions.forEach((p) => {
     const label = normalizeLabel(p.class);
-    const [x, y, w, h] = p.bbox;
-    if (isBlockedClass(label) || p.score < DETECTION_CONFIG.minRawScore || w * h < state.settings.minArea) return;
-    cleaned.push({ ...p, class: label, bbox: [x, y, w, h] });
+    const [vx, vy, vw, vh] = p.bbox;
+    const box = videoToStageBox(vx, vy, vw, vh);
+    if (!box) return;
+    if (isBlockedClass(label) || p.score < DETECTION_CONFIG.minRawScore || box.w * box.h < state.settings.minArea) return;
+    cleaned.push({ ...p, class: label, box });
   });
 
   state.rawDetections = cleaned;
@@ -282,12 +311,10 @@ function updateTracks(predictions) {
   cleaned.forEach((p) => {
     let bestId = null;
     let bestIou = 0;
-    const [x, y, w, h] = p.bbox;
-
     for (const [id, t] of state.tracked) {
       if (t.label !== p.class) continue;
-      const overlap = iou({ x, y, w, h }, t.box);
-      if (overlap > 0.18 && overlap > bestIou) {
+      const overlap = iou(p.box, t.box);
+      if (overlap > 0.16 && overlap > bestIou) {
         bestIou = overlap;
         bestId = id;
       }
@@ -298,10 +325,10 @@ function updateTracks(predictions) {
       const t = state.tracked.get(bestId);
       const a = state.settings.smoothing;
       t.box = {
-        x: t.box.x * (1 - a) + x * a,
-        y: t.box.y * (1 - a) + y * a,
-        w: t.box.w * (1 - a) + w * a,
-        h: t.box.h * (1 - a) + h * a
+        x: t.box.x * (1 - a) + p.box.x * a,
+        y: t.box.y * (1 - a) + p.box.y * a,
+        w: t.box.w * (1 - a) + p.box.w * a,
+        h: t.box.h * (1 - a) + p.box.h * a
       };
       t.score = p.score;
       t.lastSeen = now;
@@ -313,7 +340,7 @@ function updateTracks(predictions) {
         id,
         label: p.class,
         score: p.score,
-        box: { x, y, w, h },
+        box: p.box,
         seenFrames: 1,
         missFrames: 0,
         lastSeen: now,
@@ -326,8 +353,7 @@ function updateTracks(predictions) {
   unmatched.forEach((id) => {
     const t = state.tracked.get(id);
     t.missFrames += 1;
-    const ageMs = now - t.lastSeen;
-    const tooLongMissing = ageMs > DETECTION_CONFIG.trackKeepAliveMs || t.missFrames > DETECTION_CONFIG.maxMisses;
+    const tooLongMissing = now - t.lastSeen > DETECTION_CONFIG.trackKeepAliveMs || t.missFrames > DETECTION_CONFIG.maxMisses;
     if (tooLongMissing) {
       state.tracked.delete(id);
       state.cooldownByTrack.delete(id);
@@ -348,10 +374,9 @@ function stableTracks() {
 function updateMappingsUi() {
   const labels = Array.from(new Set(stableTracks().map((t) => t.label))).sort();
   const nextKey = labels.join('|');
-
   const active = document.activeElement;
-  const interactingWithMappingSelect = active && mappingListEl.contains(active) && active.tagName === 'SELECT';
-  if (interactingWithMappingSelect || nextKey === state.lastMappingKey) return;
+  const interacting = active && mappingListEl.contains(active) && active.tagName === 'SELECT';
+  if (interacting || nextKey === state.lastMappingKey) return;
 
   state.lastMappingKey = nextKey;
   mappingListEl.innerHTML = '';
@@ -362,11 +387,11 @@ function updateMappingsUi() {
     span.textContent = label;
     const sel = document.createElement('select');
     SOUND_TYPES.forEach((soundName) => {
-      const option = document.createElement('option');
-      option.value = soundName;
-      option.textContent = soundName;
-      if ((state.soundMap[label] || assignDefaultSound(label)) === soundName) option.selected = true;
-      sel.appendChild(option);
+      const o = document.createElement('option');
+      o.value = soundName;
+      o.textContent = soundName;
+      if ((state.soundMap[label] || assignDefaultSound(label)) === soundName) o.selected = true;
+      sel.appendChild(o);
     });
     sel.addEventListener('change', () => {
       state.soundMap[label] = sel.value;
@@ -383,13 +408,11 @@ function updateObjectList() {
     ? active.map((t) => `<li><span>${t.label}</span><strong>${Math.round(t.score * 100)}%</strong></li>`).join('')
     : '<li><span>No stable detections yet</span><strong>–</strong></li>';
 
-  if (!state.settings.debugRaw) {
-    rawListEl.innerHTML = '<li><span>Debug mode off</span><strong>–</strong></li>';
-  } else {
-    rawListEl.innerHTML = state.rawDetections.length
+  rawListEl.innerHTML = state.settings.debugRaw
+    ? (state.rawDetections.length
       ? state.rawDetections.slice(0, 20).map((d) => `<li><span>${d.class}</span><strong>${Math.round(d.score * 100)}%</strong></li>`).join('')
-      : '<li><span>No raw detections</span><strong>–</strong></li>';
-  }
+      : '<li><span>No raw detections</span><strong>–</strong></li>')
+    : '<li><span>Debug mode off</span><strong>–</strong></li>';
 }
 
 function pointInBox(pt, box) {
@@ -399,6 +422,7 @@ function pointInBox(pt, box) {
 function handleHits() {
   const now = performance.now();
   const tracks = stableTracks();
+
   state.fingertips.forEach((tip, idx) => {
     const containing = tracks.filter((t) => pointInBox(tip, t.box));
     containing.sort((a, b) => a.box.w * a.box.h - b.box.w * b.box.h);
@@ -428,37 +452,42 @@ function handleHits() {
 }
 
 function drawFrame() {
+  const t = state.stageTransform;
+  if (!t) return;
   const w = canvas.width;
   const h = canvas.height;
-  ctx.save();
-  ctx.translate(w, 0);
-  ctx.scale(-1, 1);
-  ctx.drawImage(video, 0, 0, w, h);
-  ctx.restore();
 
-  stableTracks().forEach((t) => {
-    const x = w - (t.box.x + t.box.w);
-    const flash = performance.now() < t.flashUntil;
+  if (t.mirror) {
+    ctx.save();
+    ctx.translate(w, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, t.srcX, t.srcY, t.srcW, t.srcH, 0, 0, w, h);
+    ctx.restore();
+  } else {
+    ctx.drawImage(video, t.srcX, t.srcY, t.srcW, t.srcH, 0, 0, w, h);
+  }
+
+  stableTracks().forEach((track) => {
+    const flash = performance.now() < track.flashUntil;
     ctx.lineWidth = flash ? 4 : 2;
-    ctx.strokeStyle = flash ? '#2ee8a6' : (isIndoorPriority(t.label) ? '#84a8ff' : '#6f83aa');
+    ctx.strokeStyle = flash ? '#2ee8a6' : (isIndoorPriority(track.label) ? '#84a8ff' : '#6f83aa');
     ctx.fillStyle = flash ? 'rgba(46, 232, 166, .18)' : 'rgba(28, 44, 88, .22)';
-    ctx.fillRect(x, t.box.y, t.box.w, t.box.h);
-    ctx.strokeRect(x, t.box.y, t.box.w, t.box.h);
+    ctx.fillRect(track.box.x, track.box.y, track.box.w, track.box.h);
+    ctx.strokeRect(track.box.x, track.box.y, track.box.w, track.box.h);
 
-    const hold = t.missFrames > 0 ? ` • hold ${t.missFrames}` : '';
-    const label = `${t.label} ${Math.round(t.score * 100)}%${hold}`;
+    const hold = track.missFrames > 0 ? ` • hold ${track.missFrames}` : '';
+    const label = `${track.label} ${Math.round(track.score * 100)}%${hold}`;
     ctx.font = '13px Inter, sans-serif';
     const tw = ctx.measureText(label).width;
     ctx.fillStyle = '#0c1220';
-    ctx.fillRect(x, Math.max(0, t.box.y - 20), tw + 12, 18);
+    ctx.fillRect(track.box.x, Math.max(0, track.box.y - 20), tw + 12, 18);
     ctx.fillStyle = '#dfe8ff';
-    ctx.fillText(label, x + 6, Math.max(14, t.box.y - 6));
+    ctx.fillText(label, track.box.x + 6, Math.max(14, track.box.y - 6));
   });
 
   state.fingertips.forEach((tip) => {
-    const x = w - tip.x;
     ctx.beginPath();
-    ctx.arc(x, tip.y, 7, 0, Math.PI * 2);
+    ctx.arc(tip.x, tip.y, 7, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255, 104, 165, .95)';
     ctx.fill();
     ctx.lineWidth = 2;
@@ -480,10 +509,10 @@ async function step() {
     }
 
     const hands = state.handLandmarker.detectForVideo(video, now);
-    state.fingertips = (hands.landmarks || []).map((landmarks) => ({
-      x: landmarks[8].x * canvas.width,
-      y: landmarks[8].y * canvas.height
-    }));
+    state.fingertips = (hands.landmarks || []).map((landmarks) => {
+      const point = videoToStagePoint(landmarks[8].x * video.videoWidth, landmarks[8].y * video.videoHeight);
+      return point || { x: -9999, y: -9999 };
+    });
 
     handleHits();
     drawFrame();
@@ -504,10 +533,10 @@ async function step() {
 
 function cameraErrorMessage(err) {
   if (!err) return 'Unknown camera error';
-  if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') return 'Camera permission was denied. Allow webcam access in browser site settings and retry.';
-  if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') return 'No camera device found. Connect/enable a webcam and retry.';
-  if (err.name === 'NotReadableError' || err.name === 'TrackStartError') return 'Camera is busy or blocked by another app. Close competing apps and retry.';
-  if (err.name === 'OverconstrainedError') return `Requested camera constraints are unsupported (${err.constraint || 'unknown constraint'}).`;
+  if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') return 'Camera permission denied. Allow webcam access and retry.';
+  if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') return 'No camera device found.';
+  if (err.name === 'NotReadableError' || err.name === 'TrackStartError') return 'Camera is busy in another app/tab.';
+  if (err.name === 'OverconstrainedError') return `Requested camera constraints unsupported (${err.constraint || 'unknown'})`;
   return statusText(err);
 }
 
@@ -518,27 +547,20 @@ async function start() {
     ensureSecureContext();
     setComponentStatus('camera', 'Requesting');
     statusBadge.textContent = 'Requesting camera…';
-    logInit(`Requesting webcam from origin ${location.origin}`);
-
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error('getUserMedia is not available in this browser. Use latest Chrome/Edge/Safari.');
-    }
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('getUserMedia is not available in this browser.');
 
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
-        facingMode: 'user'
-      },
+      video: { width: { ideal: 1080 }, height: { ideal: 1920 }, facingMode: 'user' },
       audio: false
     });
 
     video.srcObject = stream;
     await video.play();
-    canvas.width = video.videoWidth || 1280;
-    canvas.height = video.videoHeight || 720;
+    canvas.width = STAGE.width;
+    canvas.height = STAGE.height;
+    updateStageTransform();
     setComponentStatus('camera', 'Ready');
-    logInit(`Camera ready (${canvas.width}x${canvas.height})`);
+    logInit(`Camera ready ${video.videoWidth}x${video.videoHeight}; stage ${canvas.width}x${canvas.height} (9:16)`);
   } catch (err) {
     const msg = cameraErrorMessage(err);
     setComponentStatus('camera', 'Failed');
@@ -560,7 +582,7 @@ async function start() {
 
   state.running = true;
   statusBadge.textContent = 'Live';
-  logInit('Live processing started with quality-tuned detector + miss-tolerant tracking.');
+  logInit('Live processing started with portrait 9:16 stage and quality-tuned detector.');
   step();
 }
 
@@ -574,12 +596,14 @@ async function start() {
     cooldownValue.textContent = cooldownInput.value;
     smoothValue.textContent = smoothingInput.value;
     stableValue.textContent = stabilityInput.value;
+    logInit(`Control updated: conf=${state.settings.confidence}, cooldown=${state.settings.cooldownMs}, smoothing=${state.settings.smoothing}, stability=${state.settings.stabilityFrames}`);
   });
 });
 
 debugRawInput.addEventListener('change', () => {
   state.settings.debugRaw = debugRawInput.checked;
   updateObjectList();
+  logInit(`Raw detection debug ${state.settings.debugRaw ? 'enabled' : 'disabled'}`);
 });
 
 window.addEventListener('unhandledrejection', (event) => {
@@ -587,7 +611,6 @@ window.addEventListener('unhandledrejection', (event) => {
   setError(msg);
   logInit(msg);
 });
-
 window.addEventListener('error', (event) => {
   const msg = `Window error: ${event.message}`;
   setError(msg);
@@ -595,7 +618,5 @@ window.addEventListener('error', (event) => {
 });
 
 startBtn.addEventListener('click', start);
-logInit('Booted. Detector tuned for indoor recall. Person/human classes are filtered out.');
-loadModels().catch((err) => {
-  logInit(`Background model preload failed: ${statusText(err)}`);
-});
+logInit('Booted. Portrait 9:16 stage ready. Person/human classes are filtered out.');
+loadModels().catch((err) => logInit(`Background model preload failed: ${statusText(err)}`));
