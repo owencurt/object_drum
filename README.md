@@ -59,6 +59,17 @@ Required files include config/tokenizer/preprocessor and ONNX weights.
 - Diagnostics log includes exact OV model source/probe path and fallback attempts.
 - Raw debug list shows source tag per detection (`coco` or `openvocab`).
 
+
+## Static-background persistence mode
+
+The app now assumes a mostly static camera/background during play:
+
+- It runs periodic **deep scans** (higher box count + lower raw thresholds) to capture more objects.
+- Once objects are tracked, they are **persisted optimistically** instead of being quickly reaped.
+- Tracks are cleared and re-scanned when a scene/camera-position shift is detected from low-res frame fingerprinting.
+
+This is designed for desk/dorm demos where camera framing stays fixed.
+
 ## Controls
 
 All existing controls are unchanged:

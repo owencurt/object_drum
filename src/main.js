@@ -86,7 +86,15 @@ const DETECTION_CONFIG = {
   maxMisses: 18,
   openVocabEveryMs: 520,
   openVocabThreshold: 0.15,
-  detectorMergeIou: 0.56
+  detectorMergeIou: 0.56,
+  deepScanEveryMs: 2200,
+  deepScanDurationMs: 1100,
+  deepScanMaxBoxes: 85,
+  deepScanMinRawScore: 0.07,
+  deepScanOpenVocabThreshold: 0.11,
+  staticBackgroundMode: true,
+  sceneSampleEveryMs: 320,
+  sceneShiftThreshold: 34
 };
 
 const state = {
@@ -121,7 +129,13 @@ const state = {
   fpsSamples: [],
   lastMappingKey: '',
   detectorStatusBySource: { coco: 'idle', openvocab: 'idle' },
-  detectorDetailBySource: { coco: '', openvocab: '' }
+  detectorDetailBySource: { coco: '', openvocab: '' },
+  deepScanUntil: 0,
+  lastDeepScanAt: 0,
+  sceneCanvas: null,
+  sceneCtx: null,
+  sceneFingerprint: null,
+  lastSceneSampleAt: 0
 };
 
 function normalizeLabel(label) {
@@ -171,6 +185,62 @@ function dedupePredictions(predictions) {
   return kept;
 }
 
+function ensureSceneSampler() {
+  if (state.sceneCanvas) return;
+  state.sceneCanvas = document.createElement('canvas');
+  state.sceneCanvas.width = 32;
+  state.sceneCanvas.height = 18;
+  state.sceneCtx = state.sceneCanvas.getContext('2d', { willReadFrequently: true });
+}
+
+function sampleSceneFingerprint() {
+  ensureSceneSampler();
+  if (!state.sceneCtx || !video.videoWidth || !video.videoHeight) return null;
+  state.sceneCtx.drawImage(video, 0, 0, state.sceneCanvas.width, state.sceneCanvas.height);
+  const data = state.sceneCtx.getImageData(0, 0, state.sceneCanvas.width, state.sceneCanvas.height).data;
+  const bins = [];
+  for (let i = 0; i < data.length; i += 4) bins.push((data[i] + data[i + 1] + data[i + 2]) / 3);
+  return bins;
+}
+
+function sceneDifference(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
+  let sum = 0;
+  for (let i = 0; i < a.length; i += 1) sum += Math.abs(a[i] - b[i]);
+  return sum / a.length;
+}
+
+function clearTracksForSceneShift() {
+  if (!state.tracked.size) return;
+  state.tracked.clear();
+  state.cooldownByTrack.clear();
+  state.insideState.clear();
+  state.holdByPair.clear();
+  state.lastMappingKey = '';
+  logInit('Scene shift detected: cleared persisted tracks for re-scan.');
+}
+
+function monitorSceneShift(now) {
+  if (!DETECTION_CONFIG.staticBackgroundMode) return;
+  if (now - state.lastSceneSampleAt < DETECTION_CONFIG.sceneSampleEveryMs) return;
+  state.lastSceneSampleAt = now;
+
+  const sample = sampleSceneFingerprint();
+  if (!sample) return;
+  if (!state.sceneFingerprint) {
+    state.sceneFingerprint = sample;
+    return;
+  }
+
+  const diff = sceneDifference(state.sceneFingerprint, sample);
+  if (diff >= DETECTION_CONFIG.sceneShiftThreshold) {
+    state.sceneFingerprint = sample;
+    clearTracksForSceneShift();
+    state.deepScanUntil = now + DETECTION_CONFIG.deepScanDurationMs;
+    state.lastDeepScanAt = now;
+  }
+}
+
 function classifyOpenVocabError(err) {
   const text = statusText(err);
   if (/\/models\//i.test(text) && /404|not found|failed to fetch/i.test(text)) return 'missing-local-model-files';
@@ -198,11 +268,11 @@ function applyOpenVocabEnv(transformers, useLocal) {
   env.localModelPath = LOCAL_MODEL_ROOT;
 }
 
-async function detectOpenVocab() {
+async function detectOpenVocab(thresholdOverride = DETECTION_CONFIG.openVocabThreshold) {
   if (!state.openVocabDetector) return [];
   try {
     const outputs = await state.openVocabDetector(video, OPEN_VOCAB_PROMPTS, {
-      threshold: DETECTION_CONFIG.openVocabThreshold,
+      threshold: thresholdOverride,
       percentage: false
     });
     return (outputs || []).map((o) => {
@@ -463,7 +533,7 @@ function iou(a, b) {
   return inter ? inter / (a.w * a.h + b.w * b.h - inter) : 0;
 }
 
-function updateTracks(predictions) {
+function updateTracks(predictions, options = {}) {
   const now = performance.now();
   const unmatched = new Set(state.tracked.keys());
   const cleaned = [];
@@ -473,7 +543,8 @@ function updateTracks(predictions) {
     const [vx, vy, vw, vh] = p.bbox;
     const box = videoToStageBox(vx, vy, vw, vh);
     if (!box) return;
-    if (isBlockedClass(label) || p.score < DETECTION_CONFIG.minRawScore || box.w * box.h < state.settings.minArea) return;
+    const minRawScore = p.minScoreOverride ?? options.minRawScore ?? DETECTION_CONFIG.minRawScore;
+    if (isBlockedClass(label) || p.score < minRawScore || box.w * box.h < state.settings.minArea) return;
     cleaned.push({ ...p, class: label, box, source: p.source || 'coco' });
   });
 
@@ -525,6 +596,9 @@ function updateTracks(predictions) {
   unmatched.forEach((id) => {
     const t = state.tracked.get(id);
     t.missFrames += 1;
+
+    if (DETECTION_CONFIG.staticBackgroundMode) return;
+
     const tooLongMissing = now - t.lastSeen > DETECTION_CONFIG.trackKeepAliveMs || t.missFrames > DETECTION_CONFIG.maxMisses;
     if (tooLongMissing) {
       state.tracked.delete(id);
@@ -759,18 +833,30 @@ async function step() {
   if (!state.running) return;
   const now = performance.now();
   try {
+    monitorSceneShift(now);
+
     if (now - state.lastDetectionAt > DETECTION_CONFIG.detectEveryMs) {
-      const cocoPreds = (await state.detector.detect(video, DETECTION_CONFIG.maxNumBoxes))
-        .map((p) => toUnifiedPrediction({ label: p.class, score: p.score, bbox: p.bbox, source: 'coco' }));
+      const shouldDeepScan = now < state.deepScanUntil || now - state.lastDeepScanAt > DETECTION_CONFIG.deepScanEveryMs;
+      if (shouldDeepScan && now - state.lastDeepScanAt > DETECTION_CONFIG.deepScanEveryMs) {
+        state.deepScanUntil = now + DETECTION_CONFIG.deepScanDurationMs;
+        state.lastDeepScanAt = now;
+      }
+
+      const deepMode = now < state.deepScanUntil;
+      const cocoMaxBoxes = deepMode ? DETECTION_CONFIG.deepScanMaxBoxes : DETECTION_CONFIG.maxNumBoxes;
+      const cocoPreds = (await state.detector.detect(video, cocoMaxBoxes))
+        .map((p) => ({ ...toUnifiedPrediction({ label: p.class, score: p.score, bbox: p.bbox, source: 'coco' }), minScoreOverride: deepMode ? DETECTION_CONFIG.deepScanMinRawScore : undefined }));
 
       let openVocabPreds = [];
-      if (now - state.lastOpenVocabAt > DETECTION_CONFIG.openVocabEveryMs) {
-        openVocabPreds = await detectOpenVocab();
+      const openVocabEvery = deepMode ? Math.max(280, DETECTION_CONFIG.openVocabEveryMs * 0.55) : DETECTION_CONFIG.openVocabEveryMs;
+      if (now - state.lastOpenVocabAt > openVocabEvery) {
+        const ovThreshold = deepMode ? DETECTION_CONFIG.deepScanOpenVocabThreshold : DETECTION_CONFIG.openVocabThreshold;
+        openVocabPreds = await detectOpenVocab(ovThreshold);
         state.lastOpenVocabAt = now;
       }
 
       const merged = dedupePredictions([...cocoPreds, ...openVocabPreds]);
-      updateTracks(merged);
+      updateTracks(merged, { minRawScore: deepMode ? DETECTION_CONFIG.deepScanMinRawScore : DETECTION_CONFIG.minRawScore });
       updateMappingsUi();
       updateObjectList();
       state.lastDetectionAt = now;
@@ -832,6 +918,9 @@ async function start() {
     canvas.width = STAGE.width;
     canvas.height = STAGE.height;
     updateStageTransform();
+    state.sceneFingerprint = null;
+    state.lastSceneSampleAt = 0;
+    state.deepScanUntil = performance.now() + DETECTION_CONFIG.deepScanDurationMs;
     setComponentStatus('camera', 'Ready');
     logInit(`Camera ready ${video.videoWidth}x${video.videoHeight}; stage ${canvas.width}x${canvas.height} (9:16)`);
   } catch (err) {
@@ -855,7 +944,7 @@ async function start() {
 
   state.running = true;
   statusBadge.textContent = 'Live';
-  logInit('Live processing started with portrait 9:16 stage and quality-tuned detector.');
+  logInit('Live processing started with static-background persistence + periodic deep scans.');
   step();
 }
 
