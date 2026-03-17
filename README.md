@@ -113,6 +113,19 @@ Session stats include:
 If raw detections are high but tracked is low, tuning is likely too strict.
 If raw detections are low, lighting/framing/model coverage is likely the main issue.
 
+
+## Hold suppression (anti self-trigger)
+
+When a hand appears to be **grasping** an overlapped object (many landmarks inside the box + pinch/hand-shape cues sustained over frames), that hand/object pair is temporarily suppressed for hit-triggering.
+
+- This prevents a held object from repeatedly self-triggering.
+- The suppression is **per hand + per object**, so the other hand can still hit normally.
+- The pair rearms after release (hand landmarks leave the object area for multiple frames).
+
+In-session debug:
+- **Hand Mode** shows whether each hand is currently free or holding.
+- `HOLD` appears near fingertip markers when suppression is active for that hand.
+
 ## Recording recommendations
 
 - Keep browser window narrow enough that the portrait stage is dominant.

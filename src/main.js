@@ -11,6 +11,7 @@ const handStatusEl = document.getElementById('handStatus');
 const detectorModelEl = document.getElementById('detectorModel');
 const rawDetectionsEl = document.getElementById('rawDetections');
 const trackedCountEl = document.getElementById('trackedCount');
+const handModeEl = document.getElementById('handMode');
 
 const hitCountEl = document.getElementById('hitCount');
 const lastHitEl = document.getElementById('lastHit');
@@ -62,10 +63,12 @@ const state = {
   rawDetections: [],
   nextTrackId: 1,
   fingertips: [],
+  hands: [],
   hitCount: 0,
   lastHit: '–',
   insideState: new Map(),
   cooldownByTrack: new Map(),
+  holdByPair: new Map(),
   soundMap: JSON.parse(localStorage.getItem('object-drum-map') || '{}'),
   stageTransform: null,
   settings: {
@@ -419,20 +422,97 @@ function pointInBox(pt, box) {
   return pt.x >= box.x && pt.x <= box.x + box.w && pt.y >= box.y && pt.y <= box.y + box.h;
 }
 
+
+function handTrackKey(handIndex, trackId) {
+  return `${handIndex}|${trackId}`;
+}
+
+function handInsideCount(hand, box) {
+  let count = 0;
+  hand.points.forEach((pt) => {
+    if (pointInBox(pt, box)) count += 1;
+  });
+  return count;
+}
+
+function pinchClosed(hand) {
+  if (!hand.points[4] || !hand.points[8]) return false;
+  const dx = hand.points[4].x - hand.points[8].x;
+  const dy = hand.points[4].y - hand.points[8].y;
+  const pinch = Math.hypot(dx, dy);
+  const handScale = Math.max(24, hand.scale || 24);
+  return pinch < handScale * 0.45;
+}
+
+function updateHoldState(tracks) {
+  const activeKeys = new Set();
+
+  state.hands.forEach((hand, handIndex) => {
+    tracks.forEach((track) => {
+      const key = handTrackKey(handIndex, track.id);
+      activeKeys.add(key);
+
+      const insideCount = handInsideCount(hand, track.box);
+      const tipInside = pointInBox(hand.tip, track.box);
+      const wristInside = pointInBox(hand.points[0] || hand.tip, track.box);
+      const graspLike = insideCount >= 7 && (pinchClosed(hand) || wristInside);
+      const pair = state.holdByPair.get(key) || { insideFrames: 0, releaseFrames: 0, suppressed: false, reason: '' };
+
+      if (graspLike || (tipInside && insideCount >= 6)) {
+        pair.insideFrames += 1;
+        pair.releaseFrames = 0;
+      } else {
+        pair.releaseFrames += 1;
+      }
+
+      if (!pair.suppressed && pair.insideFrames >= 8 && graspLike) {
+        pair.suppressed = true;
+        pair.reason = 'holding';
+      }
+
+      if (pair.suppressed) {
+        const released = insideCount <= 2 && !tipInside && pair.releaseFrames >= 5;
+        if (released) {
+          pair.suppressed = false;
+          pair.insideFrames = 0;
+          pair.reason = '';
+        }
+      }
+
+      state.holdByPair.set(key, pair);
+    });
+  });
+
+  for (const [key, pair] of state.holdByPair.entries()) {
+    if (!activeKeys.has(key) && pair.releaseFrames >= 2) state.holdByPair.delete(key);
+    else if (!activeKeys.has(key)) pair.releaseFrames += 1;
+  }
+
+  const handLabels = state.hands.map((_, idx) => {
+    const holdingAny = tracks.some((t) => state.holdByPair.get(handTrackKey(idx, t.id))?.suppressed);
+    return holdingAny ? `H${idx + 1}:holding` : `H${idx + 1}:free`;
+  });
+  handModeEl.textContent = handLabels.length ? handLabels.join(' / ') : 'free/free';
+}
+
 function handleHits() {
   const now = performance.now();
   const tracks = stableTracks();
+  updateHoldState(tracks);
 
-  state.fingertips.forEach((tip, idx) => {
+  state.hands.forEach((hand, idx) => {
+    const tip = hand.tip;
     const containing = tracks.filter((t) => pointInBox(tip, t.box));
     containing.sort((a, b) => a.box.w * a.box.h - b.box.w * b.box.h);
     const winner = containing[0];
 
     tracks.forEach((track) => {
-      const key = `${idx}|${track.id}`;
+      const key = handTrackKey(idx, track.id);
       const inside = winner?.id === track.id;
       const wasInside = state.insideState.get(key) || false;
-      if (inside && !wasInside) {
+      const suppressed = state.holdByPair.get(key)?.suppressed;
+
+      if (inside && !wasInside && !suppressed) {
         const canHit = now - (state.cooldownByTrack.get(track.id) || 0) > state.settings.cooldownMs;
         if (canHit) {
           const sound = state.soundMap[track.label] || assignDefaultSound(track.label);
@@ -443,7 +523,9 @@ function handleHits() {
           state.lastHit = `${track.label} → ${sound}`;
         }
       }
-      state.insideState.set(key, inside);
+
+      // Keep inside state while suppressed so release/re-entry is required before re-triggering.
+      state.insideState.set(key, inside || Boolean(suppressed && pointInBox(tip, track.box)));
     });
   });
 
@@ -485,7 +567,8 @@ function drawFrame() {
     ctx.fillText(label, track.box.x + 6, Math.max(14, track.box.y - 6));
   });
 
-  state.fingertips.forEach((tip) => {
+  state.hands.forEach((hand, idx) => {
+    const tip = hand.tip;
     ctx.beginPath();
     ctx.arc(tip.x, tip.y, 7, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255, 104, 165, .95)';
@@ -493,6 +576,13 @@ function drawFrame() {
     ctx.lineWidth = 2;
     ctx.strokeStyle = 'rgba(255, 255, 255, .8)';
     ctx.stroke();
+
+    const holding = stableTracks().some((track) => state.holdByPair.get(handTrackKey(idx, track.id))?.suppressed);
+    if (holding) {
+      ctx.font = '11px Inter, sans-serif';
+      ctx.fillStyle = 'rgba(255, 184, 58, .95)';
+      ctx.fillText('HOLD', tip.x + 10, tip.y - 10);
+    }
   });
 }
 
@@ -509,10 +599,15 @@ async function step() {
     }
 
     const hands = state.handLandmarker.detectForVideo(video, now);
-    state.fingertips = (hands.landmarks || []).map((landmarks) => {
-      const point = videoToStagePoint(landmarks[8].x * video.videoWidth, landmarks[8].y * video.videoHeight);
-      return point || { x: -9999, y: -9999 };
+    state.hands = (hands.landmarks || []).map((landmarks) => {
+      const points = landmarks.map((lm) => videoToStagePoint(lm.x * video.videoWidth, lm.y * video.videoHeight) || { x: -9999, y: -9999 });
+      const tip = points[8] || { x: -9999, y: -9999 };
+      const wrist = points[0] || tip;
+      const middleMcp = points[9] || tip;
+      const scale = Math.hypot(middleMcp.x - wrist.x, middleMcp.y - wrist.y);
+      return { tip, points, scale };
     });
+    state.fingertips = state.hands.map((h) => h.tip);
 
     handleHits();
     drawFrame();
